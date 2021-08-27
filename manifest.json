@@ -1,0 +1,19 @@
+{
+    "version": "0.1",
+    "requires" : "pyyaml",
+    "__metadata__" : {
+        "license_url" : "https://skr3.nlm.nih.gov/SemMedDB/",
+        "licence" : "CC BY 4.0",
+        "url" : "https://skr3.nlm.nih.gov/SemMedDB/"
+    },
+    "dumper" : {
+        "data_url" : ["https://dl.dropboxusercontent.com/s/im2ru5epalfr9lt/semmed_source.tar.gz",
+                      "https://metamap.nlm.nih.gov/Docs/SemanticTypes_2013AA.txt"],
+        "uncompress" : true,
+        "release" : "version:get_release"
+    },
+    "uploader" : {
+        "parser" : "parser:load_data",
+        "on_duplicates" : "error"
+    }
+}
