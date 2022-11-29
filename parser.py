@@ -1,6 +1,5 @@
 import csv
 import os
-import pandas as pd
 import re
 
 
@@ -109,25 +108,17 @@ def construct_rec(line, type_label):
 
 
 def load_data(data_folder):
-    edges_path = os.path.join(data_folder, "semmed_0821.csv")
-    mapping_path = os.path.join(data_folder, "SemanticTypes_2013AA.txt")
-    names = pd.read_csv(mapping_path, sep="|", names=['abv', 'ID', 'label'])
-    type_label = dict(zip(names.abv, names.label))
+    semantic_type_filepath = os.path.join(data_folder, "SemanticTypes_2013AA.txt")
+    with open(semantic_type_filepath) as f:
+        semantic_type_reader = csv.DictReader(f, delimiter="|", fieldnames=['abv', 'ID', 'label'])
+        semantic_type_map = dict(zip((row["abv"], row["label"]) for row in semantic_type_reader))
 
-    with open(edges_path) as f:  # get total record count
-        next(f)
-        csv_total = sum(1 for line in f)
-
-    with open(edges_path) as f:  # data prep
-        csv_reader = csv.reader(f, delimiter=';')
-        next(csv_reader)
-        count = 0
-        for _item in csv_reader:
-            count += 1
-            print("Data Generation Progess:", str(count)+"/"+str(csv_total))
-            records = construct_rec(_item, type_label)
+    semmed_path = os.path.join(data_folder, "semmed_0821.csv")
+    with open(semmed_path) as f:
+        semmed_reader = csv.reader(f, delimiter=';')
+        next(semmed_reader)
+        for _item in semmed_reader:
+            records = construct_rec(_item, semantic_type_map)
             if records:
                 for record in records:
                     yield record
-            print("=====")
-        print("Data Generation is Done.")
