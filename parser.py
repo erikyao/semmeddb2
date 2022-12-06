@@ -71,11 +71,11 @@ def read_semmed_data_frame(data_folder, filename) -> pd.DataFrame:
         (4, "SUBJECT_CUI", str),         # column 4
         (5, "SUBJECT_NAME", str),        # column 5
         (6, "SUBJECT_SEMTYPE", str),     # column 6
-        (7, "SUBJECT_NOVELTY", "Int8"),  # column 7
+        (7, "SUBJECT_NOVELTY", "Int8"),  # column 7 (Currently either 0 or 1)
         (8, "OBJECT_CUI", str),          # column 8
         (9, "OBJECT_NAME", str),         # column 9
         (10, "OBJECT_SEMTYPE", str),     # column 10
-        (11, "OBJECT_NOVELTY", "Int8")   # column 11
+        (11, "OBJECT_NOVELTY", "Int8")   # column 11 (Currently either 0 or 1)
         # (12, "FACT_VALUE", "Int8"),      # column 12 (ignored)
         # (13, "MOD_SCALE", "Int8"),       # column 13 (ignored)
         # (14, "MOD_VALUE", "Int8"),       # column 14 (ignored)
@@ -88,7 +88,7 @@ def read_semmed_data_frame(data_folder, filename) -> pd.DataFrame:
     return data_frame
 
 
-def clean_semmed_data_frame(data_frame: pd.DataFrame):
+def remove_invalid_object_cuis(data_frame: pd.DataFrame):
     """
     This function exclude rows with "invalid" object CUIs in the Semmed data frame.
 
@@ -127,6 +127,15 @@ def clean_semmed_data_frame(data_frame: pd.DataFrame):
 
     cui_pattern = r"^[C0-9|]+$"  # multiple occurrences of "C", "0" to "9", or "|" (vertical bar)
     return data_frame.loc[data_frame["OBJECT_CUI"].str.match(cui_pattern)]
+
+
+def remove_zero_novelty(data_frame: pd.DataFrame):
+    """
+    Records with novelty score equal to 0 should be removed.
+    See discussion in https://github.com/biothings/pending.api/issues/63#issuecomment-1100469563
+    """
+    flags = (data_frame["SUBJECT_NOVELTY"] != 0) & (data_frame["OBJECT_NOVELTY"] != 0)
+    return data_frame.loc[flags]
 
 
 ##################
@@ -229,6 +238,7 @@ def load_data(data_folder):
     semantic_type_map = dict(zip(semantic_type_df["abv"], semantic_type_df["label"]))
 
     semmed_df = read_semmed_data_frame(data_folder, "semmedVER43_2022_R_PREDICATION.csv")
-    semmed_df = clean_semmed_data_frame(semmed_df)
+    semmed_df = remove_invalid_object_cuis(semmed_df)
+    semmed_df = remove_zero_novelty(semmed_df)
     for _, row in semmed_df.iterrows():
         yield from construct_documents(row, semantic_type_map)
