@@ -25,43 +25,40 @@ def construct_documents(row: pd.Series, semantic_type_map):
     pmid = row["PMID"]
     predicate = row["PREDICATE"]
 
-    sub_cui = row["SUBJECT_CUI"].split("|")
-    sub_name = row["SUBJECT_NAME"].split("|")
+    sub_cui_list = row["SUBJECT_CUI"].split("|")
+    sub_name_list = row["SUBJECT_NAME"].split("|")
     sub_semantic_type_abv = row["SUBJECT_SEMTYPE"]
     sub_semantic_type_name = semantic_type_map.get(sub_semantic_type_abv, None)
     sub_novelty = row["SUBJECT_NOVELTY"]
 
-    obj_cui = row["OBJECT_CUI"].split("|")
-    obj_name = row["OBJECT_NAME"].split("|")
+    obj_cui_list = row["OBJECT_CUI"].split("|")
+    obj_name_list = row["OBJECT_NAME"].split("|")
     obj_semantic_type_abv = row["OBJECT_SEMTYPE"]
     obj_semantic_type_name = semantic_type_map.get(obj_semantic_type_abv, None)
     obj_novelty = row["OBJECT_NOVELTY"]
 
-    sub_id_field = "umls"
-    obj_id_field = "umls"
+    # if "C" not present, the CUI field must be one or more gene ids
+    sub_id_field = "umls" if "C" in row["SUBJECT_CUI"] else "ncbigene"
+    obj_id_field = "umls" if "C" in row["OBJECT_CUI"] else "ncbigene"
 
-    # Define ID field name
-    if "C" not in row["SUBJECT_CUI"]:  # one or more gene ids
-        sub_id_field = "ncbigene"
-    else:
-        if '|' in row["SUBJECT_CUI"]:
+    if sub_id_field == "umls":
+        if '|' in row["SUBJECT_CUI"]:  # equivalent to `if len(sub_cui_list) > 1`
             # take first CUI if it contains gene id(s)
-            sub_cui = [sub_cui[0]]
-            sub_name = [sub_name[0]]
+            sub_cui_list = [sub_cui_list[0]]
+            sub_name_list = [sub_name_list[0]]
 
-    if "C" not in row["OBJECT_CUI"]:  # one or more gene ids
-        obj_id_field = "ncbigene"
-    else:
-        if '|' in row["OBJECT_CUI"]:  # take first CUI if it contains gene id(s)
-            obj_cui = [obj_cui[0]]
-            obj_name = [obj_name[0]]
+    if obj_id_field == "umls":
+        if '|' in row["OBJECT_CUI"]:  # equivalent to `if len(obj_cui_list) > 1`
+            # take first CUI if it contains gene id(s)
+            obj_cui_list = [obj_cui_list[0]]
+            obj_name_list = [obj_name_list[0]]
 
     id_count = 0  # loop to get all id combinations if one record has multiple ids
-    for sub_idx, sub_id in enumerate(sub_cui):
-        for obj_idx, obj_id in enumerate(obj_cui):
+    for sub_idx, sub_cui in enumerate(sub_cui_list):
+        for obj_idx, obj_cui in enumerate(obj_cui_list):
 
             id_count += 1
-            if len(sub_cui) == 1 and len(obj_cui) == 1:
+            if len(sub_cui_list) == 1 and len(obj_cui_list) == 1:
                 _id = predication_id
             else:
                 _id = predication_id + "_" + str(id_count)  # add sequence id
@@ -72,15 +69,15 @@ def construct_documents(row: pd.Series, semantic_type_map):
                 "predication_id": predication_id,
                 "pmid": pmid,
                 "subject": {
-                    sub_id_field: sub_id,
-                    "name": sub_name[sub_idx],
+                    sub_id_field: sub_cui,
+                    "name": sub_name_list[sub_idx],
                     "semantic_type_abbreviation": sub_semantic_type_abv,
                     "semantic_type_name": sub_semantic_type_name,
                     "novelty": sub_novelty
                 },
                 "object": {
-                    obj_id_field: obj_id,
-                    "name": obj_name[obj_idx],
+                    obj_id_field: obj_cui,
+                    "name": obj_name_list[obj_idx],
                     "semantic_type_abbreviation": obj_semantic_type_abv,
                     "semantic_type_name": obj_semantic_type_name,
                     "novelty": obj_novelty
@@ -92,6 +89,7 @@ def construct_documents(row: pd.Series, semantic_type_map):
                 del doc["subject"]["semantic_type_name"]
             if not obj_semantic_type_name:
                 del doc["object"]["semantic_type_name"]
+
             yield doc
 
 
