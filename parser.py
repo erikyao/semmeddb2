@@ -2,33 +2,6 @@ import os
 import pandas as pd
 
 
-def is_valid_object_cui(object_cui: str):
-    """
-    Currently in semmedVER43_2022_R_PREDICATION.csv there are a few rows with invalid object CUIs, as below:
-
-        (index)      PREDICATION_ID     OBJECT_CUI
-        7154043      80264874           1|medd
-        7154067      80264901           1|medd
-        35698397     109882731          235|Patients
-        35700796     109885303          1524|Pain
-        48339691     123980473          1|anim
-        60007185     137779669          1|dsyn
-        69460686     149136787          6|gngm
-        80202338     160180312          1|humn
-        111403674    192912334          1|neop
-        114631930    196519528          1|humn
-        114631934    196519532          1|humn
-
-    This function checks the format of the input object CUI.
-    """
-    # RE is an overkill (w.r.t. semmedVER43_2022_R_PREDICATION.csv); we can simply check if the CUI starts with "C"
-
-    # cui_pattern = re.compile('^[C0-9|.]+$')
-    # return cui_pattern.match(object_cui.strip())
-
-    return object_cui.strip().startswith("C")
-
-
 def construct_documents(row: pd.Series, semantic_type_map):
     """
     SemMedDB Database Details: https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
@@ -48,9 +21,6 @@ def construct_documents(row: pd.Series, semantic_type_map):
     OBJECT_SEMTYPE  : The semantic type of the object of the predication
     OBJECT_NOVELTY  : The novelty of the object of the predication
     """
-    if not is_valid_object_cui(row["OBJECT_CUI"]):
-        return
-
     predication_id = row["PREDICATION_ID"]
     pmid = row["PMID"]
     predicate = row["PREDICATE"]
@@ -173,11 +143,53 @@ def read_semmed_data_frame(data_folder, filename) -> pd.DataFrame:
     return data_frame
 
 
+def clean_semmed_data_frame(data_frame: pd.DataFrame):
+    """
+    This function exclude rows with "invalid" object CUIs in the Semmed data frame.
+
+    A "valid" object CUI present in "semmedVER43_2022_R_PREDICATION.csv" can be either:
+        1. A true CUI (starting with "C", followed by seven numbers, like "C0003725")
+        2. A NCBI gene ID (a numerical string, like "1756")
+        3. A piped string of a true CUI and multiple NCBI gene IDs (like "C1414968|2597")
+        4. A piped string of multiple NCBI gene IDs (like "4914|7170")
+
+    Currently in "semmedVER43_2022_R_PREDICATION.csv" there are a few rows with invalid object CUIs, as below:
+
+        (index)      PREDICATION_ID     OBJECT_CUI
+        7154043      80264874           1|medd
+        7154067      80264901           1|medd
+        35698397     109882731          235|Patients
+        35700796     109885303          1524|Pain
+        48339691     123980473          1|anim
+        60007185     137779669          1|dsyn
+        69460686     149136787          6|gngm
+        80202338     160180312          1|humn
+        111403674    192912334          1|neop
+        114631930    196519528          1|humn
+        114631934    196519532          1|humn
+
+    Subject CUIs are all valid in "semmedVER43_2022_R_PREDICATION.csv"
+    """
+
+    """
+    Below is the previous row-wise filter. Issues:
+    1. Object CUIs don't contain spaces; `strip()` operation unnecessary
+    2. Object CUIs don't contain dots; RE pattern can be simplified
+    3. Row-wise RE matching is slow; `pd.Series.str.match()` is much faster
+    """
+    # cui_pattern = re.compile(r'^[C0-9|.]+$')  # multiple occurrences of "C", "0" to "9", "|" (vertical bar), or "." (dot)
+    # return cui_pattern.match(object_cui.strip())
+
+    cui_pattern = r"^[C0-9|]+$"  # multiple occurrences of "C", "0" to "9", or "|" (vertical bar)
+    return data_frame.loc[data_frame["OBJECT_CUI"].str.match(cui_pattern)]
+
+
 def load_data(data_folder):
     semantic_type_df = read_semantic_type_data_frame(data_folder, "SemanticTypes_2013AA.txt")
     semantic_type_map = dict(zip(semantic_type_df["abv"], semantic_type_df["label"]))
 
     semmed_df = read_semmed_data_frame(data_folder, "semmedVER43_2022_R_PREDICATION.csv")
+    semmed_df = clean_semmed_data_frame(semmed_df)
     for _, row in semmed_df.iterrows():
         yield from construct_documents(row, semantic_type_map)
 
