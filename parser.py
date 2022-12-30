@@ -1,23 +1,40 @@
 import os
+from typing import Dict, Set
+import requests
 import pandas as pd
+import numpy as np
 
 
 ###################################
 # PART 1: Load Semantic Type Data #
 ###################################
 
-def read_semantic_type_data_frame(data_folder, filename) -> pd.DataFrame:
+def read_semantic_type_mappings_data_frame(data_folder, filename) -> pd.DataFrame:
     filepath = os.path.join(data_folder, filename)
     column_info = [
-        (0, 'abv', str),
-        # (1, 'ID', str),
-        (2, 'label', str)
+        # See column description at https://lhncbc.nlm.nih.gov/ii/tools/MetaMap/documentation/SemanticTypesAndGroups.html
+        (0, 'abbreviation', "string"),
+        # (1, 'TUI', "string"),
+        (2, 'fullname', "string")
     ]
     column_indices = [e[0] for e in column_info]
     column_names = [e[1] for e in column_info]
     column_dtypes = {e[1]: e[2] for e in column_info}
     data_frame = pd.read_csv(filepath, sep="|", names=column_names, usecols=column_indices, dtype=column_dtypes)
+
+    data_frame = data_frame.astype({
+        "abbreviation": "string[pyarrow]",
+        "fullname": "string[pyarrow]"
+    })
+
     return data_frame
+
+
+def get_semtype_name_map(semantic_type_data_frame: pd.DataFrame) -> Dict:
+    """
+    Get a map of <abbreviation, fullname> of Semantic Types
+    """
+    return dict(zip(semantic_type_data_frame["abbreviation"], semantic_type_data_frame["fullname"]))
 
 
 #################################
@@ -29,34 +46,105 @@ def read_mrcui_data_frame(data_folder, filename):
     column_info = [
         # Each element is a tuple of (column_index, column_name, data_type)
         #   See column description at https://www.ncbi.nlm.nih.gov/books/NBK9685/table/ch03.T.retired_cui_mapping_file_mrcui_rr/
-        (0, "CUI1", str),       # column 0
-        # (1, "VER", str),        # column 1 (ignored)
-        (2, "REL", str),        # column 2
-        # (3, "RELA", str),       # column 3 (ignored)
-        # (4, "MAPREASON", str),  # column 4 (ignored)
-        (5, "CUI2", str),       # column 5
-        # (6, "MAPIN", str)       # column 6 (ignored)
+        (0, "CUI1", "string"),  # column 0
+        # (1, "VER", "string"),  # column 1 (ignored)
+        (2, "REL", "category"),  # column 2
+        # (3, "RELA", "string"),  # column 3 (ignored)
+        # (4, "MAPREASON", "string"),  # column 4 (ignored)
+        (5, "CUI2", "string"),  # column 5
+        # (6, "MAPIN", "string")  # column 6 (ignored). We confirmed that CUI1 and CUI2 columns has no CUIs in common
     ]
     column_indices = [e[0] for e in column_info]
     column_names = [e[1] for e in column_info]
     column_dtypes = {e[1]: e[2] for e in column_info}
     data_frame = pd.read_csv(filepath, sep="|", names=column_names, usecols=column_indices, dtype=column_dtypes)
+
+    data_frame = data_frame.astype({
+        "CUI1": "string[pyarrow]",
+        "CUI2": "string[pyarrow]"
+    })
+
     return data_frame
 
 
-def get_deleted_cuis(mrcui_data_frame: pd.DataFrame) -> set:
-    deleted_flags = mrcui_data_frame["REL"] == "DEL"
-    deleted_cuis = mrcui_data_frame.loc[deleted_flags, "CUI1"]
+def get_retired_cuis_for_deletion(mrcui_data_frame: pd.DataFrame) -> Set:
+    deletion_flags = (mrcui_data_frame["REL"] == "DEL")
+    deleted_cuis = mrcui_data_frame.loc[deletion_flags, "CUI1"].unique()
     return set(deleted_cuis)
 
 
+def get_retirement_mapping_data_frame(mrcui_data_frame: pd.DataFrame) -> pd.DataFrame:
+    # Exclude rows whose "CUI2" is empty
+    mapping_data_frame = mrcui_data_frame.loc[~mrcui_data_frame["CUI2"].isnull(), ["CUI1", "CUI2"]]
+    return mapping_data_frame
+
+
+def add_cui_name_and_semtype_to_retirement_mapping(retirement_mapping_data_frame, semmed_cui_name_semtype_data_frame, umls_cui_name_semtype_data_frame):
+    """
+    Given a replacement CUI (for a retired CUI), its name and semtype should be looked up in the SemMedDB data frame at first.
+    If not present, look up in the external "UMLS_CUI_Semtype.tsv" file.
+
+    This function will match the CUI names semtypes to the replacement CUIs (as in the "CUI2" column) of the "retirement_mapping_data_frame". CUI names and
+    semtypes from SemMedDB will be preferred for matching.
+    """
+
+    new_cuis = set(retirement_mapping_data_frame["CUI2"].unique())
+    semmed_cui_info = semmed_cui_name_semtype_data_frame.loc[semmed_cui_name_semtype_data_frame["CUI"].isin(new_cuis)]
+    umls_cui_info = umls_cui_name_semtype_data_frame.loc[umls_cui_name_semtype_data_frame["CUI"].isin(new_cuis)]
+    preferred_cui_info = pd.concat([semmed_cui_info, umls_cui_info], ignore_index=True, copy=False)
+    # because SemMed values are put above UMLS values in "preferred_cui_info", so keep="first" will preserve the SemMed values if duplicates are found
+    preferred_cui_info.drop_duplicates(subset=["CUI", "SEMTYPE"], keep="first", inplace=True)
+
+    """
+    Why left join here? Because "retirement_mapping_df" ("MRCUI.RRF") may contain a replacement CUI having no preferred English name and thus not
+        included in "umls_cui_name_semtype_data_frame" ("UMLS_CUI_Semtype.tsv")
+    E.g. C4082455 is replaced by C4300557, according to "MRCUI.RRF". However C4300557 has only one preferred name in French, "Non-disjonction mitotique"
+    Left join would cause NaN values (which means a failed replacement) for C4082455. Such retired CUIs will be deleted directly. Therefore, for now we should 
+        keep C4082455 in the result.
+    """
+    retirement_mapping_data_frame = retirement_mapping_data_frame.merge(preferred_cui_info, how="left", left_on="CUI2", right_on="CUI")
+    retirement_mapping_data_frame.drop(columns="CUI", inplace=True)
+    retirement_mapping_data_frame.rename(columns={"CONCEPT_NAME": "CUI2_NAME", "SEMTYPE": "CUI2_SEMTYPE"}, inplace=True)
+
+    return retirement_mapping_data_frame
+
+
+#########################################################
+# PART 3: Load CUI Names/Semantic Types for Replacement #
+#########################################################
+
+
+def read_cui_name_and_semtype_from_umls(data_folder, filename) -> pd.DataFrame:
+    filepath = os.path.join(data_folder, filename)
+    column_info = [
+        # Each element is a tuple of (column_index, column_name, data_type)
+        (0, "CUI", "string"),
+        (1, "CONCEPT_NAME", "string"),
+        # (2, "SEMTYPE_FULLNAME", "string"),  # we will map semantic type abbreviations to fullnames when constructing documents later, no need to read this column
+        (3, "SEMTYPE", "string")
+    ]
+    column_indices = [e[0] for e in column_info]
+    column_names = [e[1] for e in column_info]
+    column_dtypes = {e[1]: e[2] for e in column_info}
+    # Ignore the original header, use column names defined above
+    data_frame = pd.read_csv(filepath, sep="\t", header=0, names=column_names, usecols=column_indices, dtype=column_dtypes)
+
+    data_frame = data_frame.astype({
+        "CUI": "string[pyarrow]",
+        "CONCEPT_NAME": "string[pyarrow]",
+        "SEMTYPE": "string[pyarrow]"
+    })
+
+    return data_frame
+
+
 ############################
-# PART 3: Load SemMed Data #
+# PART 4: Load SemMed Data #
 ############################
 
 def read_semmed_data_frame(data_folder, filename) -> pd.DataFrame:
     filepath = os.path.join(data_folder, filename)
-    encoding = "latin1"  # TODO encode in UTF-8 before outputting
+    encoding = "latin1"  # TODO encode in UTF-8 before outputting? Once read in strings, it's UTF (to be confirmed)?
     na_value = r"\N"
     column_info = [
         # Each element is a tuple of (column_index, column_name, data_type)
@@ -64,33 +152,45 @@ def read_semmed_data_frame(data_folder, filename) -> pd.DataFrame:
         # "Int8" is a nullable integer type (while `int` cannot handle NA values), range [-128, 127]
         # "UInt32" ranges [0, 4294967295]
         #   See https://pandas.pydata.org/docs/user_guide/basics.html#basics-dtypes
-        (0, "PREDICATION_ID", str),      # column 0 (Auto-generated primary key; read as strings for easier concatenation)
-        # (1, "SENTENCE_ID", str),         # column 1 (ignored)
-        (2, "PMID", "UInt32"),           # column 2 (PubMed IDs are 8-digit numbers)
-        (3, "PREDICATE", str),           # column 3
-        (4, "SUBJECT_CUI", str),         # column 4
-        (5, "SUBJECT_NAME", str),        # column 5
-        (6, "SUBJECT_SEMTYPE", str),     # column 6
+        (0, "PREDICATION_ID", "UInt32"),  # column 0 (Auto-generated primary key; current max is 199,713,830)
+        # (1, "SENTENCE_ID", "string"),  # column 1 (ignored)
+        (2, "PMID", "UInt32"),  # column 2 (PubMed IDs are 8-digit numbers)
+        (3, "PREDICATE", "string"),  # column 3
+        (4, "SUBJECT_CUI", "string"),  # column 4
+        (5, "SUBJECT_NAME", "string"),  # column 5
+        (6, "SUBJECT_SEMTYPE", "string"),  # column 6
         (7, "SUBJECT_NOVELTY", "Int8"),  # column 7 (Currently either 0 or 1)
-        (8, "OBJECT_CUI", str),          # column 8
-        (9, "OBJECT_NAME", str),         # column 9
-        (10, "OBJECT_SEMTYPE", str),     # column 10
-        (11, "OBJECT_NOVELTY", "Int8")   # column 11 (Currently either 0 or 1)
-        # (12, "FACT_VALUE", "Int8"),      # column 12 (ignored)
-        # (13, "MOD_SCALE", "Int8"),       # column 13 (ignored)
-        # (14, "MOD_VALUE", "Int8"),       # column 14 (ignored)
+        (8, "OBJECT_CUI", "string"),  # column 8
+        (9, "OBJECT_NAME", "string"),  # column 9
+        (10, "OBJECT_SEMTYPE", "string"),  # column 10
+        (11, "OBJECT_NOVELTY", "Int8")  # column 11 (Currently either 0 or 1)
+        # (12, "FACT_VALUE", "Int8"),  # column 12 (ignored)
+        # (13, "MOD_SCALE", "Int8"),  # column 13 (ignored)
+        # (14, "MOD_VALUE", "Int8"),  # column 14 (ignored)
     ]
     column_indices = [e[0] for e in column_info]
     column_names = [e[1] for e in column_info]
     column_dtypes = {e[1]: e[2] for e in column_info}
-    data_frame = pd.read_csv(filepath, names=column_names, sep=",", usecols=column_indices,
+    data_frame = pd.read_csv(filepath, sep=",", names=column_names, usecols=column_indices,
                              dtype=column_dtypes, na_values=[na_value], encoding=encoding)
+
+    data_frame = data_frame.astype({
+        "PREDICATE": "string[pyarrow]",
+        "SUBJECT_CUI": "string[pyarrow]",
+        "SUBJECT_NAME": "string[pyarrow]",
+        "SUBJECT_SEMTYPE": "string[pyarrow]",
+        "OBJECT_CUI": "string[pyarrow]",
+        "OBJECT_NAME": "string[pyarrow]",
+        "OBJECT_SEMTYPE": "string[pyarrow]"
+    })
+
     return data_frame
 
 
-def remove_invalid_object_cuis(data_frame: pd.DataFrame):
+def delete_invalid_object_cuis(semmed_data_frame: pd.DataFrame):
     """
-    This function exclude rows with "invalid" object CUIs in the Semmed data frame.
+    This function remove rows with "invalid" object CUIs in the Semmed data frame.
+    ote this operation must be done BEFORE "explode_pipes()" is called.
 
     A "valid" object CUI present in "semmedVER43_2022_R_PREDICATION.csv" can be either:
         1. A true CUI (starting with "C", followed by seven numbers, like "C0003725")
@@ -113,7 +213,7 @@ def remove_invalid_object_cuis(data_frame: pd.DataFrame):
         114631930    196519528          1|humn
         114631934    196519532          1|humn
 
-    Subject CUIs are all valid in "semmedVER43_2022_R_PREDICATION.csv"
+    Subject CUIs are all valid in "semmedVER43_2022_R_PREDICATION.csv".
     """
 
     """
@@ -126,21 +226,261 @@ def remove_invalid_object_cuis(data_frame: pd.DataFrame):
     # return cui_pattern.match(object_cui.strip())
 
     cui_pattern = r"^[C0-9|]+$"  # multiple occurrences of "C", "0" to "9", or "|" (vertical bar)
-    return data_frame.loc[data_frame["OBJECT_CUI"].str.match(cui_pattern)]
+    valid_flags = semmed_data_frame["OBJECT_CUI"].str.match(cui_pattern)
+    invalid_index = semmed_data_frame.index[~valid_flags]
+    semmed_data_frame.drop(index=invalid_index, inplace=True)
+    semmed_data_frame.reset_index(drop=True, inplace=True)
+    return semmed_data_frame
 
 
-def remove_zero_novelty(data_frame: pd.DataFrame):
+def delete_zero_novelty_scores(semmed_data_frame: pd.DataFrame):
     """
-    Records with novelty score equal to 0 should be removed.
+    Rows with novelty score equal to 0 should be removed.
     See discussion in https://github.com/biothings/pending.api/issues/63#issuecomment-1100469563
     """
-    flags = (data_frame["SUBJECT_NOVELTY"] != 0) & (data_frame["OBJECT_NOVELTY"] != 0)
-    return data_frame.loc[flags]
+    zero_novelty_flags = semmed_data_frame["SUBJECT_NOVELTY"].eq(0) | semmed_data_frame["OBJECT_NOVELTY"].eq(0)
+    zero_novelty_index = semmed_data_frame.index[zero_novelty_flags]
+    semmed_data_frame.drop(index=zero_novelty_index, inplace=True)
+    semmed_data_frame.reset_index(drop=True, inplace=True)
+    return semmed_data_frame
 
 
+def explode_pipes(semmed_data_frame: pd.DataFrame):
+    """
+    Split "SUBJECT_CUI", "SUBJECT_NAME", "OBJECT_CUI", and "OBJECT_NAME" by pipes. Then transform the split values into individual rows.
+
+    E.g. given the original data
+
+        PREDICATION_ID  SUBJECT_CUI     SUBJECT_NAME          OBJECT_CUI    OBJECT_NAME
+        11021926        2212|2213|9103  FCGR2A|FCGR2B|FCGR2C  C1332714|920  CD4 gene|CD4
+
+    After splitting by pipes, we have
+
+        PREDICATION_ID  SUBJECT_CUI       SUBJECT_NAME            OBJECT_CUI      OBJECT_NAME
+        11021926        [2212,2213,9103]  [FCGR2A,FCGR2B,FCGR2C]  [C1332714,920]  [CD4 gene,CD4]
+
+    After the "explode" operations (see https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.DataFrame.explode.html), we have
+
+        PREDICATION_ID  SUBJECT_CUI  SUBJECT_NAME  OBJECT_CUI  OBJECT_NAME
+        11021926        2212         FCGR2A        C1332714    CD4 gene
+        11021926        2213         FCGR2B        C1332714    CD4 gene
+        11021926        9103         FCGR2C        C1332714    CD4 gene
+        11021926        2212         FCGR2A        920         CD4
+        11021926        2213         FCGR2B        920         CD4
+        11021926        9103         FCGR2C        920         CD4
+    """
+
+    sub_piped_flags = semmed_data_frame["SUBJECT_CUI"].str.contains(r"\|")
+    obj_piped_flags = semmed_data_frame["OBJECT_CUI"].str.contains(r"\|")
+    piped_flags = sub_piped_flags | obj_piped_flags
+
+    semmed_data_frame["IS_PIPED"] = piped_flags
+    semmed_data_frame.set_index("IS_PIPED", append=False, inplace=True)  # use "IS_PIPED" as the new index; discard the original integer index
+
+    piped_predications = semmed_data_frame.loc[True]
+
+    piped_predications = piped_predications.assign(
+        OBJECT_CUI=piped_predications["OBJECT_CUI"].str.split(r"\|"),
+        OBJECT_NAME=piped_predications["OBJECT_NAME"].str.split(r"\|"),
+        SUBJECT_CUI=piped_predications["SUBJECT_CUI"].str.split(r"\|"),
+        SUBJECT_NAME=piped_predications["SUBJECT_NAME"].str.split(r"\|")
+    )
+
+    piped_predications = piped_predications.explode(["OBJECT_CUI", "OBJECT_NAME"])
+    piped_predications = piped_predications.explode(["SUBJECT_CUI", "SUBJECT_NAME"])
+    # These 4 columns' dtypes are changed to "object" after the above "assign" and "explode" operations
+    # Convert them to "string[pyarrow]" for less memory usage
+    piped_predications = piped_predications.astype({
+        "SUBJECT_CUI": "string[pyarrow]",
+        "SUBJECT_NAME": "string[pyarrow]",
+        "OBJECT_CUI": "string[pyarrow]",
+        "OBJECT_NAME": "string[pyarrow]",
+    })
+
+    """
+    "CUI" columns may contain empty strings and "NAME" columns may contain "None" strings, e.g.:
+    
+        PREDICATION_ID  SUBJECT_CUI          SUBJECT_NAME              OBJECT_CUI           OBJECT_NAME
+        72530597        C0757738||100329167  m-AAA protease|None|AAA1  C1330957             Cytokinesis of the fertilized ovum
+        75458336        C1167321             inner membrane            C0757738||100329167  m-AAA protease|None|AAA1
+        
+    Rows containing such values after "explode" operations should be dropped.
+    """
+    piped_predications.reset_index(drop=False, inplace=True)
+    empty_value_flags = \
+        piped_predications["SUBJECT_CUI"].eq('') | piped_predications["SUBJECT_NAME"].eq('None') | \
+        piped_predications["OBJECT_CUI"].eq('') | piped_predications["OBJECT_NAME"].eq('None')
+    empty_value_index = piped_predications.index[empty_value_flags]
+    piped_predications.drop(index=empty_value_index, inplace=True)
+    piped_predications.set_index("IS_PIPED", append=False, inplace=True)
+
+    semmed_data_frame.drop(index=True, inplace=True)  # drop the original piped predications (marked by True values in "IS_PIPED" index)
+    semmed_data_frame = pd.concat([semmed_data_frame, piped_predications], copy=False)  # append the "exploded" piped predications
+    semmed_data_frame.reset_index(drop=False, inplace=True)
+
+    return semmed_data_frame
+
+
+def delete_retired_cuis(semmed_data_frame: pd.DataFrame, retired_cuis: Set):
+    """
+    Remove rows containing deleted CUIs specified in "MRCUI.RRF" file.
+    Note this operation must be done AFTER "explode_pipes()" is called.
+    """
+    deleted_flags = semmed_data_frame["OBJECT_CUI"].isin(retired_cuis) | semmed_data_frame["SUBJECT_CUI"].isin(retired_cuis)
+    deleted_index = semmed_data_frame.index[deleted_flags]
+    semmed_data_frame.drop(index=deleted_index, inplace=True)
+    semmed_data_frame.reset_index(drop=True, inplace=True)
+    return semmed_data_frame
+
+
+def add_prefix_columns(semmed_data_frame: pd.DataFrame):
+    """
+    Add 2 columns, "SUBJECT_PREFIX" and "OBJECT_PREFIX" to the SemMedDB data frame.
+    If a "CUI" is a real CUI starting with the letter "C", its prefix would be "umls";
+    otherwise the "CUI" should be a NCBIGene ID, and its prefix would be "ncbigene".
+    """
+    subject_prefix_series = pd.Series(np.where(semmed_data_frame["SUBJECT_CUI"].str.startswith("C"), "umls", "ncbigene"), dtype="category")
+    object_prefix_series = pd.Series(np.where(semmed_data_frame["OBJECT_CUI"].str.startswith("C"), "umls", "ncbigene"), dtype="category")
+
+    semmed_data_frame = semmed_data_frame.assign(
+        SUBJECT_PREFIX=subject_prefix_series,
+        OBJECT_PREFIX=object_prefix_series
+    )
+
+    return semmed_data_frame
+
+
+def get_cui_name_and_semtype_from_semmed(semmed_data_frame: pd.DataFrame):
+    sub_cui_flags = semmed_data_frame["SUBJECT_PREFIX"].eq("umls")
+    obj_cui_flags = semmed_data_frame["OBJECT_PREFIX"].eq("umls")
+
+    sub_cui_semtype_data_frame = semmed_data_frame.loc[sub_cui_flags, ["SUBJECT_CUI", "SUBJECT_NAME", "SUBJECT_SEMTYPE"]]
+    obj_cui_semtype_data_frame = semmed_data_frame.loc[obj_cui_flags, ["OBJECT_CUI", "OBJECT_NAME", "OBJECT_SEMTYPE"]]
+
+    sub_cui_semtype_data_frame.drop_duplicates(subset=["SUBJECT_CUI", "SUBJECT_SEMTYPE"], inplace=True)
+    obj_cui_semtype_data_frame.drop_duplicates(subset=["OBJECT_CUI", "OBJECT_SEMTYPE"], inplace=True)
+
+    unified_column_names = ["CUI", "CONCEPT_NAME", "SEMTYPE"]
+    sub_cui_semtype_data_frame.columns = unified_column_names
+    obj_cui_semtype_data_frame.columns = unified_column_names
+
+    cui_semtype_data_frame = pd.concat([sub_cui_semtype_data_frame, obj_cui_semtype_data_frame], ignore_index=True, copy=False)
+    cui_semtype_data_frame.drop_duplicates(subset=["CUI", "SEMTYPE"], inplace=True)
+    return cui_semtype_data_frame
+
+
+def map_retired_cuis(semmed_data_frame: pd.DataFrame, retirement_mapping_data_frame: pd.DataFrame):
+    """
+    Let's rename:
+
+    - semmed_data_frame as table A(SUBJECT_CUI, SUBJECT_NAME, SUBJECT_SEMTYPE, OBJECT_CUI, OBJECT_NAME, OBJECT_SEMTYPE), the target of replacement,
+    - retirement_mapping_data_frame as table B(CUI1, CUI2, CUI2_NAME, CUI2_SEMTYPE) where CUI1 is the retired CUI column while CUI2 is new CUI column, and
+
+    The replacement is carried out in the following steps:
+
+    1. Find from A all predications with retired subjects or objects, resulting in table X
+    2. Replace predications with retired subjects
+        2.1 X.merge(B, how="left", left_on=[SUBJECT_CUI, SUBJECT_SEMTYPE], right_on=[CUI1, CUI2_SEMTYPE]), i.e. find the same semantic-typed new CUI2
+            for each retired SUBJECT_CUI, resulting in table Y
+        2.2 Replace columns (SUBJECT_CUI, SUBJECT_NAME, SUBJECT_SEMTYPE) in Y with matched (CUI2, CUI2_NAME, CUI2_SEMTYPE), resulting in table Z
+    3. Replace predications with retired objects
+        3.1 Z.merge(B, how="left", left_on=[SUBJECT_CUI, SUBJECT_SEMTYPE], right_on=[CUI1, CUI2_SEMTYPE]), i.e. find the same semantic-typed new CUI2
+            for each retired SUBJECT_CUI, resulting in table W
+        3.2 Replace columns (SUBJECT_CUI, SUBJECT_NAME, SUBJECT_SEMTYPE) in W with matched (CUI2, CUI2_NAME, CUI2_SEMTYPE), resulting in table V
+    4. Drop X from A, and then append V to A, resulting in table U. Return U as result.
+    """
+
+    ##########
+    # Step 1 #
+    ##########
+    """
+    Find all retired CUIs to be replaced.
+
+    P.S. Do not use set(mapping_data_frame["CUI1"].unique()). See comments below.
+    E.g. CUI C4082455 should be replaced to C4300557. However C4300557 is not in the "mapping_data_frame"
+    In this case, all predications with CUI C4082455 should also be marked by "replaced_sub_flags" and be deleted later
+    """
+    retired_cuis = set(retirement_mapping_data_frame["CUI1"].unique())
+    sub_retired_flags = semmed_data_frame["SUBJECT_CUI"].isin(retired_cuis)
+    obj_retired_flags = semmed_data_frame["OBJECT_CUI"].isin(retired_cuis)
+    retired_flags = sub_retired_flags | obj_retired_flags
+
+    semmed_data_frame["IS_SUBJECT_RETIRED"] = sub_retired_flags
+    semmed_data_frame["IS_OBJECT_RETIRED"] = obj_retired_flags
+
+    # It does not matter if "retired_predications" is a view or a copy of "semmed_data_frame"
+    #   since the below "merge" operation always returns a new dataframe.
+    # Therefore, operations on "retired_predications" won't alter "semmed_data_frame".
+    retired_predications = semmed_data_frame.loc[retired_flags]
+
+    ##########
+    # Step 2 #
+    ##########
+    retired_predications = retired_predications.merge(retirement_mapping_data_frame, how="left",
+                                                      left_on=["SUBJECT_CUI", "SUBJECT_SEMTYPE"],
+                                                      right_on=["CUI1", "CUI2_SEMTYPE"])  # match by CUIs and semtypes together
+    # Overwrite retired SUBJECT_* values with matched CUI2_* values
+    retired_predications["SUBJECT_CUI"] = np.where(retired_predications["IS_SUBJECT_RETIRED"],
+                                                   retired_predications["CUI2"], retired_predications["SUBJECT_CUI"])
+    retired_predications["SUBJECT_NAME"] = np.where(retired_predications["IS_SUBJECT_RETIRED"],
+                                                    retired_predications["CUI2_NAME"], retired_predications["SUBJECT_NAME"])
+    retired_predications["SUBJECT_SEMTYPE"] = np.where(retired_predications["IS_SUBJECT_RETIRED"],
+                                                       retired_predications["CUI2_SEMTYPE"], retired_predications["SUBJECT_SEMTYPE"])
+
+    # Drop all merged columns from retirement_mapping_data_frame
+    retired_predications.drop(columns=retirement_mapping_data_frame.columns, inplace=True)
+    # Drop all predications whose retired subjects are unmatched
+    retired_predications.dropna(axis=0, how="any", subset=["SUBJECT_CUI", "SUBJECT_NAME", "SUBJECT_SEMTYPE"], inplace=True)
+
+    ##########
+    # Step 3 #
+    ##########
+    retired_predications = retired_predications.merge(retirement_mapping_data_frame, how="left",
+                                                      left_on=["OBJECT_CUI", "OBJECT_SEMTYPE"],
+                                                      right_on=["CUI1", "CUI2_SEMTYPE"])  # match by CUIs and semtypes together
+    # Overwrite retired OBJECT_* values with new CUI2_* values
+    retired_predications["OBJECT_CUI"] = np.where(retired_predications["IS_OBJECT_RETIRED"],
+                                                  retired_predications["CUI2"], retired_predications["OBJECT_CUI"])
+    retired_predications["OBJECT_NAME"] = np.where(retired_predications["IS_OBJECT_RETIRED"],
+                                                   retired_predications["CUI2_NAME"], retired_predications["OBJECT_NAME"])
+    retired_predications["OBJECT_SEMTYPE"] = np.where(retired_predications["IS_OBJECT_RETIRED"],
+                                                      retired_predications["CUI2_SEMTYPE"], retired_predications["OBJECT_SEMTYPE"])
+
+    # Drop all merged columns from retirement_mapping_data_frame
+    retired_predications.drop(columns=retirement_mapping_data_frame.columns, inplace=True)
+    # Drop all predications whose retired objects are unmatched
+    retired_predications.dropna(axis=0, how="any", subset=["OBJECT_CUI", "OBJECT_NAME", "OBJECT_SEMTYPE"], inplace=True)
+
+    ##########
+    # Step 4 #
+    ##########
+    # Now these two columns are not necessary. Drop them to save memory
+    retired_predications.drop(columns=["IS_SUBJECT_RETIRED", "IS_OBJECT_RETIRED"], inplace=True)
+    semmed_data_frame.drop(columns=["IS_SUBJECT_RETIRED", "IS_OBJECT_RETIRED"], inplace=True)
+
+    # Drop the original retired predications
+    retired_index = semmed_data_frame.index[retired_flags]
+    semmed_data_frame.drop(index=retired_index, inplace=True)
+
+    # Append the matched new predications
+    semmed_data_frame = pd.concat([semmed_data_frame, retired_predications], ignore_index=True, copy=False)
+    semmed_data_frame.sort_values(by="PREDICATION_ID", ignore_index=True)
+
+    return semmed_data_frame
+
 ##################
-# PART 4: Parser #
+# PART 5: Parser #
 ##################
+
+
+# def query_node_normalizer(cui: str):
+#     # TODO batch query for the whole data frame? (POST with `curies`)
+#     # TODO or single queries row by row? (GET with `curie`)
+#     curie = f"UMLS:{cui}"
+#     conflate = False  # "conflate" means "the conflated data will be returned", see https://github.com/TranslatorSRI/Babel/wiki/Babel-output-formats#conflation
+#     url = f"https://nodenorm.transltr.io/get_normalized_nodes?curie={curie}&conflate={conflate}"
+#     resp = requests.get(url)
+
 
 def construct_documents(row: pd.Series, semantic_type_map):
     """
@@ -161,84 +501,62 @@ def construct_documents(row: pd.Series, semantic_type_map):
     OBJECT_SEMTYPE  : The semantic type of the object of the predication
     OBJECT_NOVELTY  : The novelty of the object of the predication
     """
-    predication_id = row["PREDICATION_ID"]
-    pmid = row["PMID"]
-    predicate = row["PREDICATE"]
+    doc = {
+        "_id": row["_ID"],
+        "predication_id": row["PREDICATION_ID"],
+        "pmid": row["PMID"],
+        "predicate": row["PREDICATE"],
+        "subject": {
+            row["SUBJECT_PREFIX"]: row["SUBJECT_CUI"],
+            "name": row["SUBJECT_NAME"],
+            "semantic_type_abbreviation": row["SUBJECT_SEMTYPE"],
+            "semantic_type_name": semantic_type_map.get(row["SUBJECT_SEMTYPE"], None),
+            "novelty": row["SUBJECT_NOVELTY"]
+        },
+        "object": {
+            row["OBJECT_PREFIX"]: row["OBJECT_CUI"],
+            "name": row["OBJECT_NAME"],
+            "semantic_type_abbreviation": row["OBJECT_SEMTYPE"],
+            "semantic_type_name": semantic_type_map.get(row["OBJECT_SEMTYPE"], None),
+            "novelty": row["OBJECT_NOVELTY"]
+        }
+    }
 
-    sub_cui_list = row["SUBJECT_CUI"].split("|")
-    sub_name_list = row["SUBJECT_NAME"].split("|")
-    sub_semantic_type_abv = row["SUBJECT_SEMTYPE"]
-    sub_semantic_type_name = semantic_type_map.get(sub_semantic_type_abv, None)
-    sub_novelty = row["SUBJECT_NOVELTY"]
+    # del semtype_name field if we did not any mappings
+    if not doc["subject"]["semantic_type_name"]:
+        del doc["subject"]["semantic_type_name"]
+    if not doc["object"]["semantic_type_name"]:
+        del doc["object"]["semantic_type_name"]
 
-    obj_cui_list = row["OBJECT_CUI"].split("|")
-    obj_name_list = row["OBJECT_NAME"].split("|")
-    obj_semantic_type_abv = row["OBJECT_SEMTYPE"]
-    obj_semantic_type_name = semantic_type_map.get(obj_semantic_type_abv, None)
-    obj_novelty = row["OBJECT_NOVELTY"]
-
-    # if "C" not present, the CUI field must be one or more gene ids
-    sub_id_field = "umls" if "C" in row["SUBJECT_CUI"] else "ncbigene"
-    obj_id_field = "umls" if "C" in row["OBJECT_CUI"] else "ncbigene"
-
-    if sub_id_field == "umls":
-        if '|' in row["SUBJECT_CUI"]:  # equivalent to `if len(sub_cui_list) > 1`
-            # take first CUI if it contains gene id(s)
-            sub_cui_list = [sub_cui_list[0]]
-            sub_name_list = [sub_name_list[0]]
-
-    if obj_id_field == "umls":
-        if '|' in row["OBJECT_CUI"]:  # equivalent to `if len(obj_cui_list) > 1`
-            # take first CUI if it contains gene id(s)
-            obj_cui_list = [obj_cui_list[0]]
-            obj_name_list = [obj_name_list[0]]
-
-    id_count = 0  # loop to get all id combinations if one record has multiple ids
-    for sub_idx, sub_cui in enumerate(sub_cui_list):
-        for obj_idx, obj_cui in enumerate(obj_cui_list):
-
-            id_count += 1
-            if len(sub_cui_list) == 1 and len(obj_cui_list) == 1:
-                _id = predication_id
-            else:
-                _id = predication_id + "_" + str(id_count)  # add sequence id
-
-            doc = {
-                "_id": _id,
-                "predicate": predicate,
-                "predication_id": predication_id,
-                "pmid": pmid,
-                "subject": {
-                    sub_id_field: sub_cui,
-                    "name": sub_name_list[sub_idx],
-                    "semantic_type_abbreviation": sub_semantic_type_abv,
-                    "semantic_type_name": sub_semantic_type_name,
-                    "novelty": sub_novelty
-                },
-                "object": {
-                    obj_id_field: obj_cui,
-                    "name": obj_name_list[obj_idx],
-                    "semantic_type_abbreviation": obj_semantic_type_abv,
-                    "semantic_type_name": obj_semantic_type_name,
-                    "novelty": obj_novelty
-                }
-            }
-
-            # del semtype_name field if we did not any mappings
-            if not sub_semantic_type_name:
-                del doc["subject"]["semantic_type_name"]
-            if not obj_semantic_type_name:
-                del doc["object"]["semantic_type_name"]
-
-            yield doc
+    yield doc
 
 
 def load_data(data_folder):
-    semantic_type_df = read_semantic_type_data_frame(data_folder, "SemanticTypes_2013AA.txt")
-    semantic_type_map = dict(zip(semantic_type_df["abv"], semantic_type_df["label"]))
-
     semmed_df = read_semmed_data_frame(data_folder, "semmedVER43_2022_R_PREDICATION.csv")
-    semmed_df = remove_invalid_object_cuis(semmed_df)
-    semmed_df = remove_zero_novelty(semmed_df)
+    semmed_df = delete_zero_novelty_scores(semmed_df)
+    semmed_df = delete_invalid_object_cuis(semmed_df)
+    semmed_df = explode_pipes(semmed_df)
+
+    mrcui_df = read_mrcui_data_frame(data_folder, "MRCUI.RRF")
+    deleted_cuis = get_retired_cuis_for_deletion(mrcui_df)
+    semmed_df = delete_retired_cuis(semmed_df, deleted_cuis)
+
+    semmed_df = add_prefix_columns(semmed_df)
+    semmed_cui_name_semtype_df = get_cui_name_and_semtype_from_semmed(semmed_df)
+    umls_cui_name_semtype_df = read_cui_name_and_semtype_from_umls(data_folder, "UMLS_CUI_Semtype.tsv")
+    retirement_mapping_df = get_retirement_mapping_data_frame(mrcui_df)
+    retirement_mapping_df = add_cui_name_and_semtype_to_retirement_mapping(retirement_mapping_df, semmed_cui_name_semtype_df, umls_cui_name_semtype_df)
+    semmed_df = map_retired_cuis(semmed_df, retirement_mapping_df)
+
+    semtype_mappings_df = read_semantic_type_mappings_data_frame(data_folder, "SemanticTypes_2018AB.txt")
+    semtype_name_map = get_semtype_name_map(semtype_mappings_df)
+
+    # TODO query node normalizer in each GroupBy(PredicateID)
     for _, row in semmed_df.iterrows():
-        yield from construct_documents(row, semantic_type_map)
+        yield from construct_documents(row, semtype_name_map)
+
+# TODO load_data(data_folder, use_intermediate=False)
+"""
+if not use_intermediate:
+    go thru data cleaning
+"""
