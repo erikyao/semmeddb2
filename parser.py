@@ -1,8 +1,13 @@
 import os
-from typing import Dict, Set
-import requests
+import aiohttp
+import asyncio
 import pandas as pd
 import numpy as np
+
+from typing import Dict, Set
+from collections.abc import Collection  # for type hints
+
+from biothings.utils.common import iter_n
 
 
 ###################################
@@ -272,8 +277,11 @@ def explode_pipes(semmed_data_frame: pd.DataFrame):
 
     sub_piped_flags = semmed_data_frame["SUBJECT_CUI"].str.contains(r"\|")
     obj_piped_flags = semmed_data_frame["OBJECT_CUI"].str.contains(r"\|")
-    piped_flags = sub_piped_flags | obj_piped_flags
+    # These two indices are necessary to locate equivalent NCBIGene IDs
+    semmed_data_frame["IS_SUBJECT_PIPED"] = sub_piped_flags
+    semmed_data_frame["IS_OBJECT_PIPED"] = obj_piped_flags
 
+    piped_flags = sub_piped_flags | obj_piped_flags
     semmed_data_frame["IS_PIPED"] = piped_flags
     semmed_data_frame.set_index("IS_PIPED", append=False, inplace=True)  # use "IS_PIPED" as the new index; discard the original integer index
 
@@ -306,17 +314,17 @@ def explode_pipes(semmed_data_frame: pd.DataFrame):
         
     Rows containing such values after "explode" operations should be dropped.
     """
-    piped_predications.reset_index(drop=False, inplace=True)
+    piped_predications.reset_index(drop=False, inplace=True)  # switch to the integer index, for ".drop(index=?)" operation below
     empty_value_flags = \
         piped_predications["SUBJECT_CUI"].eq('') | piped_predications["SUBJECT_NAME"].eq('None') | \
         piped_predications["OBJECT_CUI"].eq('') | piped_predications["OBJECT_NAME"].eq('None')
     empty_value_index = piped_predications.index[empty_value_flags]
     piped_predications.drop(index=empty_value_index, inplace=True)
-    piped_predications.set_index("IS_PIPED", append=False, inplace=True)
+    piped_predications.set_index("IS_PIPED", append=False, inplace=True)  # switch back to the "IS_PIPED" index, for ".concat()" operation below
 
     semmed_data_frame.drop(index=True, inplace=True)  # drop the original piped predications (marked by True values in "IS_PIPED" index)
     semmed_data_frame = pd.concat([semmed_data_frame, piped_predications], copy=False)  # append the "exploded" piped predications
-    semmed_data_frame.reset_index(drop=False, inplace=True)
+    semmed_data_frame.reset_index(drop=True, inplace=True)  # drop the "IS_PIPED" index (no longer needed)
 
     return semmed_data_frame
 
@@ -451,6 +459,15 @@ def map_retired_cuis(semmed_data_frame: pd.DataFrame, retirement_mapping_data_fr
     # Drop all predications whose retired objects are unmatched
     retired_predications.dropna(axis=0, how="any", subset=["OBJECT_CUI", "OBJECT_NAME", "OBJECT_SEMTYPE"], inplace=True)
 
+    retired_predications = retired_predications.astype({
+        "SUBJECT_CUI": "string[pyarrow]",
+        "SUBJECT_NAME": "string[pyarrow]",
+        "SUBJECT_SEMTYPE": "string[pyarrow]",
+        "OBJECT_CUI": "string[pyarrow]",
+        "OBJECT_NAME": "string[pyarrow]",
+        "OBJECT_SEMTYPE": "string[pyarrow]",
+    })
+
     ##########
     # Step 4 #
     ##########
@@ -468,19 +485,69 @@ def map_retired_cuis(semmed_data_frame: pd.DataFrame, retirement_mapping_data_fr
 
     return semmed_data_frame
 
+
+##################################
+# PART 5: Node Normalizer Client #
+##################################
+
+async def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Collection, chunk_size: int, connector_limit: int) -> Dict:
+    """
+    Given a collection of CUIs, query Node Normalizer to fetch their equivalent NCBIGene IDs.
+
+    To avoid timeout issues, the CUI collection will be partitioned into chunks.
+    Each chunk of CUIs will be passed to the Node Normalizer's POST endpoint for querying.
+
+    To avoid other traffic errors, use `connector_limit` to control the number of parallel connections to the endpoint.
+    """
+
+    # Define the querying task for each chunk of CUIs
+    async def _query(aio_session: aiohttp.ClientSession, cui_chunk: Collection) -> dict:
+        cui_gene_id_map = {}
+
+        cui_prefix = "UMLS:"
+        gene_id_prefix = "NCBIGene:"
+
+        url = f"https://nodenorm.transltr.io/get_normalized_nodes"
+        payload = {
+            # {"conflate": True} means "the conflated data will be returned by the endpoint", which is not necessary here.
+            # See https://github.com/TranslatorSRI/Babel/wiki/Babel-output-formats#conflation
+            "conflate": False,
+            "curies": [f"{cui_prefix}{cui}" for cui in cui_chunk]
+        }
+
+        async with aio_session.post(url, json=payload) as resp:
+            json_resp = await resp.json()
+
+            for curie, curie_result in json_resp.items():
+                if curie_result is None:
+                    continue
+
+                for eq_id in curie_result.get("equivalent_identifiers"):
+                    identifier = eq_id["identifier"]
+                    if identifier.startswith(gene_id_prefix):
+                        cui = curie[len(cui_prefix):]  # trim out the prefix "UMLS:"
+                        cui_gene_id_map[cui] = identifier[len(gene_id_prefix):]  # trim out the prefix "NCBIGene:"
+                        break
+
+        return cui_gene_id_map
+
+    # Create a querying task for each chunk of CUI collections, run them, collect and combine the results
+    connector = aiohttp.TCPConnector(limit=connector_limit)  #
+    async with aiohttp.ClientSession(connector=connector, raise_for_status=True) as session:
+        tasks = [_query(session, cui_chunk) for cui_chunk in iter_n(cui_collection, chunk_size)]
+
+        # "asyncio.gather()" will wait on the entire task set to be completed.
+        # If you want to process results greedily as they come in, loop over asyncio.as_completed()
+        cui_gene_id_maps = await asyncio.gather(*tasks, return_exceptions=True)  # "cui_gene_id_maps" is a list of dictionaries
+
+        # Merge all dictionaries in "cui_gene_id_maps"
+        merged_map = {cui: gene_id for cg_map in cui_gene_id_maps for cui, gene_id in cg_map.items()}
+        return merged_map
+
+
 ##################
-# PART 5: Parser #
+# PART 6: Parser #
 ##################
-
-
-# def query_node_normalizer(cui: str):
-#     # TODO batch query for the whole data frame? (POST with `curies`)
-#     # TODO or single queries row by row? (GET with `curie`)
-#     curie = f"UMLS:{cui}"
-#     conflate = False  # "conflate" means "the conflated data will be returned", see https://github.com/TranslatorSRI/Babel/wiki/Babel-output-formats#conflation
-#     url = f"https://nodenorm.transltr.io/get_normalized_nodes?curie={curie}&conflate={conflate}"
-#     resp = requests.get(url)
-
 
 def construct_documents(row: pd.Series, semantic_type_map):
     """
