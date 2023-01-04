@@ -365,6 +365,7 @@ def get_cui_name_and_semtype_from_semmed(semmed_data_frame: pd.DataFrame):
     sub_cui_semtype_data_frame = semmed_data_frame.loc[sub_cui_flags, ["SUBJECT_CUI", "SUBJECT_NAME", "SUBJECT_SEMTYPE"]]
     obj_cui_semtype_data_frame = semmed_data_frame.loc[obj_cui_flags, ["OBJECT_CUI", "OBJECT_NAME", "OBJECT_SEMTYPE"]]
 
+    # TODO add notes
     sub_cui_semtype_data_frame.drop_duplicates(subset=["SUBJECT_CUI", "SUBJECT_SEMTYPE"], inplace=True)
     obj_cui_semtype_data_frame.drop_duplicates(subset=["OBJECT_CUI", "OBJECT_SEMTYPE"], inplace=True)
 
@@ -486,6 +487,93 @@ def map_retired_cuis(semmed_data_frame: pd.DataFrame, retirement_mapping_data_fr
     return semmed_data_frame
 
 
+async def delete_equivalent_ncbigene_ids(semmed_data_frame: pd.DataFrame):
+    async def get_cui_to_gene_id_maps(sub_cui_flags: pd.Series, obj_cui_flags: pd.Series):
+        sub_cuis = set(semmed_data_frame.loc[sub_cui_flags, "SUBJECT_CUI"].unique())
+        obj_cuis = set(semmed_data_frame.loc[obj_cui_flags, "OBJECT_CUI"].unique())
+
+        cuis = sub_cuis.union(obj_cuis)
+        chunk_size = 1000
+        connector_limit = 10
+        # a <CUI, Gene_ID> map where there the key is a source CUI and the value is its equivalent NCBIGene ID
+        cui_gene_id_map = await query_node_normalizer_for_equivalent_ncbigene_ids(cuis, chunk_size=chunk_size, connector_limit=connector_limit)
+
+        sub_cui_gene_id_map = {cui: gene_id for cui, gene_id in cui_gene_id_map.items() if cui in sub_cuis}
+        obj_cui_gene_id_map = {cui: gene_id for cui, gene_id in cui_gene_id_map.items() if cui in obj_cuis}
+
+        return sub_cui_gene_id_map, obj_cui_gene_id_map
+
+    def get_pred_id_to_cui_maps(sub_cui_flags: pd.Series, obj_cui_flags: pd.Series):
+        sub_cui_predications = semmed_data_frame.loc[sub_cui_flags, ["SUBJECT_CUI", "PREDICATION_ID"]]
+        obj_cui_predications = semmed_data_frame.loc[obj_cui_flags, ["OBJECT_CUI", "PREDICATION_ID"]]
+
+        pred_id_sub_cui_map = dict(zip(sub_cui_predications["PREDICATION_ID"], sub_cui_predications["SUBJECT_CUI"]))
+        pred_id_obj_cui_map = dict(zip(obj_cui_predications["PREDICATION_ID"], obj_cui_predications["OBJECT_CUI"]))
+
+        return pred_id_sub_cui_map, pred_id_obj_cui_map
+
+    def establish_pred_id_to_gene_id_map(pid_cui_map: Dict, cui_gid_map: Dict):
+        pid_gid_map = {pid: cui_gid_map[cui] for pid, cui in pid_cui_map.items() if cui in cui_gid_map}
+        return pid_gid_map
+
+    def get_row_index_of_equivalent_ncbigene_ids(pred_id_sub_gene_id_map: Dict, pred_id_obj_gene_id_map: Dict):
+        sub_piped_predications = semmed_data_frame.loc[semmed_data_frame["IS_SUBJECT_PIPED"], ["PREDICATION_ID", "SUBJECT_CUI"]]
+        obj_piped_predications = semmed_data_frame.loc[semmed_data_frame["IS_OBJECT_PIPED"], ["PREDICATION_ID", "OBJECT_CUI"]]
+
+        sub_piped_predications.reset_index(drop=False, inplace=True)  # make the integer index a column named "index"
+        obj_piped_predications.reset_index(drop=False, inplace=True)  # make the integer index a column named "index"
+
+        sub_piped_predications.set_index(["PREDICATION_ID", "SUBJECT_CUI"], append=False, inplace=True)  # do not append the default integer index to columns
+        obj_piped_predications.set_index(["PREDICATION_ID", "OBJECT_CUI"], append=False, inplace=True)  # do not append the default integer index to columns
+
+        sub_piped_predications.sort_index(inplace=True)
+        obj_piped_predications.sort_index(inplace=True)
+
+        dest_pred_id_sub_gene_id_pairs = [(pid, gid) for (pid, gid) in pred_id_sub_gene_id_map.items() if (pid, gid) in sub_piped_predications.index]
+        dest_pred_id_obj_gene_id_pairs = [(pid, gid) for (pid, gid) in pred_id_obj_gene_id_map.items() if (pid, gid) in obj_piped_predications.index]
+
+        dest_row_index_of_equivalent_gid_for_sub = set(sub_piped_predications.loc[dest_pred_id_sub_gene_id_pairs, "index"].values)
+        dest_row_index_of_equivalent_gid_for_obj = set(obj_piped_predications.loc[dest_pred_id_obj_gene_id_pairs, "index"].values)
+
+        dest_row_index = dest_row_index_of_equivalent_gid_for_sub.union(dest_row_index_of_equivalent_gid_for_obj)
+        return dest_row_index
+
+    candidate_sub_cui_flags = semmed_data_frame["IS_SUBJECT_PIPED"] & semmed_data_frame["SUBJECT_PREFIX"].eq("umls")
+    candidate_obj_cui_flags = semmed_data_frame["IS_OBJECT_PIPED"] & semmed_data_frame["OBJECT_PREFIX"].eq("umls")
+    sub_cui_gid_map, obj_cui_gid_map = await get_cui_to_gene_id_maps(candidate_sub_cui_flags, candidate_obj_cui_flags)
+
+    source_sub_cui_flags = semmed_data_frame["IS_SUBJECT_PIPED"] & semmed_data_frame["SUBJECT_CUI"].isin(sub_cui_gid_map)
+    source_obj_cui_flags = semmed_data_frame["IS_OBJECT_PIPED"] & semmed_data_frame["OBJECT_CUI"].isin(obj_cui_gid_map)
+    pid_sub_cui_map, pid_obj_cui_map = get_pred_id_to_cui_maps(source_sub_cui_flags, source_obj_cui_flags)
+
+    pid_sub_gid_map = establish_pred_id_to_gene_id_map(pid_sub_cui_map, sub_cui_gid_map)
+    pid_obj_gid_map = establish_pred_id_to_gene_id_map(pid_obj_cui_map, obj_cui_gid_map)
+
+    dest_equivalent_gid_index = get_row_index_of_equivalent_ncbigene_ids(pid_sub_gid_map, pid_obj_gid_map)
+
+    semmed_data_frame.drop(index=dest_equivalent_gid_index, inplace=True)
+    return semmed_data_frame
+
+
+def add_document_id_column(semmed_data_frame: pd.DataFrame):
+    # CUIs in descending order so a true CUI precedes a NCBIGene ID
+    semmed_data_frame.sort_values(by=['PREDICATION_ID', 'SUBJECT_CUI', 'OBJECT_CUI'],
+                                  ascending=[True, False, False], ignore_index=True, inplace=True)
+
+    primary_ids = semmed_data_frame["PREDICATION_ID"].astype("string[pyarrow]")
+
+    groupwise_pred_nums = semmed_data_frame.groupby("PREDICATION_ID").cumcount().add(1)
+    secondary_ids = (f"{pid}-{num}" for pid, num in zip(semmed_data_frame["PREDICATION_ID"], groupwise_pred_nums))
+    secondary_ids = pd.Series(data=secondary_ids, dtype="string[pyarrow]", index=semmed_data_frame.index)
+
+    group_sizes = semmed_data_frame.groupby('PREDICATION_ID').transform('size')
+    _ids = pd.Series(data=np.where(group_sizes.eq(1), primary_ids, secondary_ids),
+                     dtype="string[pyarrow]", index=semmed_data_frame.index)
+
+    semmed_data_frame["_ID"] = _ids
+    return semmed_data_frame
+
+
 ##################################
 # PART 5: Node Normalizer Client #
 ##################################
@@ -509,9 +597,9 @@ async def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Coll
 
         url = f"https://nodenorm.transltr.io/get_normalized_nodes"
         payload = {
-            # {"conflate": True} means "the conflated data will be returned by the endpoint", which is not necessary here.
+            # {"conflate": True} means "the conflated data will be returned by the endpoint".
             # See https://github.com/TranslatorSRI/Babel/wiki/Babel-output-formats#conflation
-            "conflate": False,
+            "conflate": True,
             "curies": [f"{cui_prefix}{cui}" for cui in cui_chunk]
         }
 
@@ -549,7 +637,7 @@ async def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Coll
 # PART 6: Parser #
 ##################
 
-def construct_documents(row: pd.Series, semantic_type_map):
+def construct_document(row: pd.Series, semantic_type_map):
     """
     SemMedDB Database Details: https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
 
@@ -615,15 +703,12 @@ def load_data(data_folder):
     retirement_mapping_df = add_cui_name_and_semtype_to_retirement_mapping(retirement_mapping_df, semmed_cui_name_semtype_df, umls_cui_name_semtype_df)
     semmed_df = map_retired_cuis(semmed_df, retirement_mapping_df)
 
+    semmed_df = await delete_equivalent_ncbigene_ids(semmed_df)
+
+    semmed_df = add_document_id_column(semmed_df)
+
     semtype_mappings_df = read_semantic_type_mappings_data_frame(data_folder, "SemanticTypes_2018AB.txt")
     semtype_name_map = get_semtype_name_map(semtype_mappings_df)
 
-    # TODO query node normalizer in each GroupBy(PredicateID)
     for _, row in semmed_df.iterrows():
-        yield from construct_documents(row, semtype_name_map)
-
-# TODO load_data(data_folder, use_intermediate=False)
-"""
-if not use_intermediate:
-    go thru data cleaning
-"""
+        yield from construct_document(row, semtype_name_map)
