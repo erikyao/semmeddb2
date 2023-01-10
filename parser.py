@@ -576,20 +576,20 @@ async def delete_equivalent_ncbigene_ids(semmed_data_frame: pd.DataFrame,
 
 
 def add_document_id_column(semmed_data_frame: pd.DataFrame):
-    # CUIs in descending order so a true CUI precedes a NCBIGene ID
+    # CUIs in descending order so a true CUI always precedes a NCBIGene ID inside a predication group
     semmed_data_frame.sort_values(by=['PREDICATION_ID', 'SUBJECT_CUI', 'OBJECT_CUI'],
                                   ascending=[True, False, False], ignore_index=True, inplace=True)
 
-    primary_ids = semmed_data_frame["PREDICATION_ID"].astype("string[pyarrow]")
+    pred_groups = semmed_data_frame.loc[:, ["PREDICATION_ID"]].groupby("PREDICATION_ID")
+    groupwise_pred_nums = pred_groups.cumcount().add(1)
+    group_sizes = pred_groups.transform("size")
 
-    groupwise_pred_nums = semmed_data_frame.groupby("PREDICATION_ID").cumcount().add(1)
+    primary_ids = semmed_data_frame["PREDICATION_ID"].astype("string[pyarrow]")
     secondary_ids = (f"{pid}-{num}" for pid, num in zip(semmed_data_frame["PREDICATION_ID"], groupwise_pred_nums))
     secondary_ids = pd.Series(data=secondary_ids, dtype="string[pyarrow]", index=semmed_data_frame.index)
 
-    group_sizes = semmed_data_frame.groupby('PREDICATION_ID').transform('size')
     _ids = pd.Series(data=np.where(group_sizes.eq(1), primary_ids, secondary_ids),
                      dtype="string[pyarrow]", index=semmed_data_frame.index)
-
     semmed_data_frame["_ID"] = _ids
     return semmed_data_frame
 
