@@ -126,7 +126,8 @@ def read_cui_name_and_semtype_from_umls(data_folder, filename) -> pd.DataFrame:
         # Each element is a tuple of (column_index, column_name, data_type)
         (0, "CUI", "string"),
         (1, "CONCEPT_NAME", "string"),
-        # (2, "SEMTYPE_FULLNAME", "string"),  # we will map semantic type abbreviations to fullnames when constructing documents later, no need to read this column
+        # we will map semantic type abbreviations to fullnames when constructing documents later, no need to read this column for now
+        # (2, "SEMTYPE_FULLNAME", "string"),
         (3, "SEMTYPE", "string")
     ]
     column_indices = [e[0] for e in column_info]
@@ -150,7 +151,7 @@ def read_cui_name_and_semtype_from_umls(data_folder, filename) -> pd.DataFrame:
 
 def read_semmed_data_frame(data_folder, filename) -> pd.DataFrame:
     filepath = os.path.join(data_folder, filename)
-    encoding = "latin1"  # TODO encode in UTF-8 before outputting? Once read in strings, it's UTF (to be confirmed)?
+    encoding = "latin1"  # file may contain chars in other languages (e.g. French)
     na_value = r"\N"
     column_info = [
         # Each element is a tuple of (column_index, column_name, data_type)
@@ -366,7 +367,13 @@ def get_cui_name_and_semtype_from_semmed(semmed_data_frame: pd.DataFrame):
     sub_cui_semtype_data_frame = semmed_data_frame.loc[sub_cui_flags, ["SUBJECT_CUI", "SUBJECT_NAME", "SUBJECT_SEMTYPE"]]
     obj_cui_semtype_data_frame = semmed_data_frame.loc[obj_cui_flags, ["OBJECT_CUI", "OBJECT_NAME", "OBJECT_SEMTYPE"]]
 
-    # TODO add notes
+    """
+    Drop duplicates in advance in order to:
+    1. reduce memory usage, and
+    2. avoid the "ArrowInvalid: offset overflow while concatenating arrays" error due to a bug in Apache Arrow.
+    
+    See https://issues.apache.org/jira/browse/ARROW-10799 for the bug details
+    """
     sub_cui_semtype_data_frame.drop_duplicates(subset=["SUBJECT_CUI", "SUBJECT_SEMTYPE"], inplace=True)
     obj_cui_semtype_data_frame.drop_duplicates(subset=["OBJECT_CUI", "OBJECT_SEMTYPE"], inplace=True)
 
