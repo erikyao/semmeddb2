@@ -1,4 +1,5 @@
 import os
+import pickle
 import aiohttp
 import asyncio
 import pandas as pd
@@ -487,16 +488,27 @@ def map_retired_cuis(semmed_data_frame: pd.DataFrame, retirement_mapping_data_fr
     return semmed_data_frame
 
 
-async def delete_equivalent_ncbigene_ids(semmed_data_frame: pd.DataFrame):
+async def delete_equivalent_ncbigene_ids(semmed_data_frame: pd.DataFrame,
+                                         node_normalizer_cache: str = None,
+                                         node_normalizer_output: str = None):
     async def get_cui_to_gene_id_maps(sub_cui_flags: pd.Series, obj_cui_flags: pd.Series):
         sub_cuis = set(semmed_data_frame.loc[sub_cui_flags, "SUBJECT_CUI"].unique())
         obj_cuis = set(semmed_data_frame.loc[obj_cui_flags, "OBJECT_CUI"].unique())
 
-        cuis = sub_cuis.union(obj_cuis)
-        chunk_size = 1000
-        connector_limit = 10
-        # a <CUI, Gene_ID> map where there the key is a source CUI and the value is its equivalent NCBIGene ID
-        cui_gene_id_map = await query_node_normalizer_for_equivalent_ncbigene_ids(cuis, chunk_size=chunk_size, connector_limit=connector_limit)
+        if node_normalizer_cache and os.path.exists(node_normalizer_cache):
+            with open(node_normalizer_cache, 'rb') as handle:
+                cui_gene_id_map = pickle.load(handle)
+        else:
+            cuis = sub_cuis.union(obj_cuis)
+            chunk_size = 1000
+            connector_limit = 10
+            # a <CUI, Gene_ID> map where there the key is a source CUI and the value is its equivalent NCBIGene ID
+            cui_gene_id_map = await query_node_normalizer_for_equivalent_ncbigene_ids(cuis, chunk_size=chunk_size, connector_limit=connector_limit)
+
+        # Output to the specified pickle file regardless if it's cache or live response
+        if node_normalizer_output:
+            with open(node_normalizer_output, 'wb') as handle:
+                pickle.dump(cui_gene_id_map, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
         sub_cui_gene_id_map = {cui: gene_id for cui, gene_id in cui_gene_id_map.items() if cui in sub_cuis}
         obj_cui_gene_id_map = {cui: gene_id for cui, gene_id in cui_gene_id_map.items() if cui in obj_cuis}
@@ -523,20 +535,21 @@ async def delete_equivalent_ncbigene_ids(semmed_data_frame: pd.DataFrame):
         sub_piped_predications.reset_index(drop=False, inplace=True)  # make the integer index a column named "index"
         obj_piped_predications.reset_index(drop=False, inplace=True)  # make the integer index a column named "index"
 
-        sub_piped_predications.set_index(["PREDICATION_ID", "SUBJECT_CUI"], append=False, inplace=True)  # do not append the default integer index to columns
-        obj_piped_predications.set_index(["PREDICATION_ID", "OBJECT_CUI"], append=False, inplace=True)  # do not append the default integer index to columns
+        pid_sub_gid_df = pd.DataFrame(data=pred_id_sub_gene_id_map.items(), columns=["PREDICATION_ID", "SUBJECT_CUI"])
+        pid_obj_gid_df = pd.DataFrame(data=pred_id_obj_gene_id_map.items(), columns=["PREDICATION_ID", "OBJECT_CUI"])
 
-        sub_piped_predications.sort_index(inplace=True)
-        obj_piped_predications.sort_index(inplace=True)
+        dest_sub_gid_df = sub_piped_predications.merge(pid_sub_gid_df, how="inner",
+                                                       left_on=["PREDICATION_ID", "SUBJECT_CUI"],
+                                                       right_on=["PREDICATION_ID", "SUBJECT_CUI"])
+        dest_obj_gid_df = obj_piped_predications.merge(pid_obj_gid_df, how="inner",
+                                                       left_on=["PREDICATION_ID", "OBJECT_CUI"],
+                                                       right_on=["PREDICATION_ID", "OBJECT_CUI"])
 
-        dest_pred_id_sub_gene_id_pairs = [(pid, gid) for (pid, gid) in pred_id_sub_gene_id_map.items() if (pid, gid) in sub_piped_predications.index]
-        dest_pred_id_obj_gene_id_pairs = [(pid, gid) for (pid, gid) in pred_id_obj_gene_id_map.items() if (pid, gid) in obj_piped_predications.index]
+        dest_sub_gid_index = set(dest_sub_gid_df["index"].unique())
+        dest_obj_gid_index = set(dest_obj_gid_df["index"].unique())
 
-        dest_row_index_of_equivalent_gid_for_sub = set(sub_piped_predications.loc[dest_pred_id_sub_gene_id_pairs, "index"].values)
-        dest_row_index_of_equivalent_gid_for_obj = set(obj_piped_predications.loc[dest_pred_id_obj_gene_id_pairs, "index"].values)
-
-        dest_row_index = dest_row_index_of_equivalent_gid_for_sub.union(dest_row_index_of_equivalent_gid_for_obj)
-        return dest_row_index
+        dest_gid_index = dest_sub_gid_index.union(dest_obj_gid_index)
+        return dest_gid_index
 
     candidate_sub_cui_flags = semmed_data_frame["IS_SUBJECT_PIPED"] & semmed_data_frame["SUBJECT_PREFIX"].eq("umls")
     candidate_obj_cui_flags = semmed_data_frame["IS_OBJECT_PIPED"] & semmed_data_frame["OBJECT_PREFIX"].eq("umls")
