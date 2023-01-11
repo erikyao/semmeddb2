@@ -9,7 +9,7 @@ There are four files required by this parser:
     - [Download page](https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/SemMedDB_download.html) (**UMLS login required**)
 2. `SemanticTypes_2018AB.txt`, the _Semantic Type Mappings_ file
     - Version: `2018AB`
-    - [Download page](https://lhncbc.nlm.nih.gov/ii/tools/MetaMap/documentation/SemanticTypesAndGroups.html) (**UMLS login required**)
+    - [Download page](https://lhncbc.nlm.nih.gov/ii/tools/MetaMap/documentation/SemanticTypesAndGroups.html)
 3. `MRCUI.RRF`, the _Retired CUI Mapping_ file
     - Version: `2022AA`
     - Download page: this file is part of the [2022AA UMLS Metathesaurus Full Subset](https://www.nlm.nih.gov/research/umls/licensedcontent/umlsarchives04.html) (**UMLS login required**); no direct download link is available.
