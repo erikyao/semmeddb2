@@ -7,12 +7,13 @@
     },
     "dumper" : {
         "data_url" : [
-            "https://data.lhncbc.nlm.nih.gov/umls-restricted/ii/tools/SemRep_SemMedDB_SKR/semmedVER43_2022_R_PREDICATION.csv.gz",
-            "https://lhncbc.nlm.nih.gov/ii/tools/MetaMap/Docs/SemanticTypes_2018AB.txt",
+            "http://localhost:8080/dataupload/mysrc/semmeddb/semmedVER43_2022_R_PREDICATION.csv",
             "http://localhost:8080/dataupload/mysrc/semmeddb/MRCUI.RRF",
-            "http://localhost:8080/dataupload/mysrc/semmeddb/UMLS_CUI_Semtype.tsv"
+            "http://localhost:8080/dataupload/mysrc/semmeddb/UMLS_CUI_Semtype.tsv",
+            "http://localhost:8080/dataupload/mysrc/semmeddb/semmedVER43_2022_R_PREDICATION_NodeNorm.pickle",
+            "https://lhncbc.nlm.nih.gov/ii/tools/MetaMap/Docs/SemanticTypes_2018AB.txt"
         ],
-        "uncompress" : true,
+        "uncompress" : false,
         "release" : "version:get_release"
     },
     "uploader" : {
