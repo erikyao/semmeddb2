@@ -1,7 +1,6 @@
 import os
 import pickle
-import aiohttp
-import asyncio
+import requests
 import pandas as pd
 import numpy as np
 
@@ -495,10 +494,10 @@ def map_retired_cuis(semmed_data_frame: pd.DataFrame, retirement_mapping_data_fr
     return semmed_data_frame
 
 
-async def delete_equivalent_ncbigene_ids(semmed_data_frame: pd.DataFrame,
-                                         node_normalizer_cache: str = None,
-                                         node_normalizer_output: str = None):
-    async def get_cui_to_gene_id_maps(sub_cui_flags: pd.Series, obj_cui_flags: pd.Series):
+def delete_equivalent_ncbigene_ids(semmed_data_frame: pd.DataFrame,
+                                   node_normalizer_cache: str = None,
+                                   node_normalizer_output: str = None):
+    def get_cui_to_gene_id_maps(sub_cui_flags: pd.Series, obj_cui_flags: pd.Series, chunk_size=1000):
         sub_cuis = set(semmed_data_frame.loc[sub_cui_flags, "SUBJECT_CUI"].unique())
         obj_cuis = set(semmed_data_frame.loc[obj_cui_flags, "OBJECT_CUI"].unique())
 
@@ -507,10 +506,8 @@ async def delete_equivalent_ncbigene_ids(semmed_data_frame: pd.DataFrame,
                 cui_gene_id_map = pickle.load(handle)
         else:
             cuis = sub_cuis.union(obj_cuis)
-            chunk_size = 1000
-            connector_limit = 10
             # a <CUI, Gene_ID> map where there the key is a source CUI and the value is its equivalent NCBIGene ID
-            cui_gene_id_map = await query_node_normalizer_for_equivalent_ncbigene_ids(cuis, chunk_size=chunk_size, connector_limit=connector_limit)
+            cui_gene_id_map = query_node_normalizer_for_equivalent_ncbigene_ids(cuis, chunk_size=chunk_size)
 
         # Output to the specified pickle file regardless if it's cache or live response
         if node_normalizer_output:
@@ -560,7 +557,7 @@ async def delete_equivalent_ncbigene_ids(semmed_data_frame: pd.DataFrame,
 
     candidate_sub_cui_flags = semmed_data_frame["IS_SUBJECT_PIPED"] & semmed_data_frame["SUBJECT_PREFIX"].eq("umls")
     candidate_obj_cui_flags = semmed_data_frame["IS_OBJECT_PIPED"] & semmed_data_frame["OBJECT_PREFIX"].eq("umls")
-    sub_cui_gid_map, obj_cui_gid_map = await get_cui_to_gene_id_maps(candidate_sub_cui_flags, candidate_obj_cui_flags)
+    sub_cui_gid_map, obj_cui_gid_map = get_cui_to_gene_id_maps(candidate_sub_cui_flags, candidate_obj_cui_flags, chunk_size=1000)
 
     source_sub_cui_flags = semmed_data_frame["IS_SUBJECT_PIPED"] & semmed_data_frame["SUBJECT_CUI"].isin(sub_cui_gid_map)
     source_obj_cui_flags = semmed_data_frame["IS_OBJECT_PIPED"] & semmed_data_frame["OBJECT_CUI"].isin(obj_cui_gid_map)
@@ -598,18 +595,16 @@ def add_document_id_column(semmed_data_frame: pd.DataFrame):
 # PART 5: Node Normalizer Client #
 ##################################
 
-async def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Collection, chunk_size: int, connector_limit: int) -> Dict:
+def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Collection, chunk_size: int) -> Dict:
     """
     Given a collection of CUIs, query Node Normalizer to fetch their equivalent NCBIGene IDs.
 
     To avoid timeout issues, the CUI collection will be partitioned into chunks.
     Each chunk of CUIs will be passed to the Node Normalizer's POST endpoint for querying.
-
-    To avoid other traffic errors, use `connector_limit` to control the number of parallel connections to the endpoint.
     """
 
     # Define the querying task for each chunk of CUIs
-    async def _query(aio_session: aiohttp.ClientSession, cui_chunk: Collection) -> dict:
+    def _query(cui_chunk: Collection) -> dict:
         cui_gene_id_map = {}
 
         cui_prefix = "UMLS:"
@@ -623,34 +618,28 @@ async def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Coll
             "curies": [f"{cui_prefix}{cui}" for cui in cui_chunk]
         }
 
-        async with aio_session.post(url, json=payload) as resp:
-            json_resp = await resp.json()
+        resp = requests.post(url, json=payload)
+        resp.raise_for_status()
+        json_resp = resp.json()
 
-            for curie, curie_result in json_resp.items():
-                if curie_result is None:
-                    continue
+        for curie, curie_result in json_resp.items():
+            if curie_result is None:
+                continue
 
-                for eq_id in curie_result.get("equivalent_identifiers"):
-                    identifier = eq_id["identifier"]
-                    if identifier.startswith(gene_id_prefix):
-                        cui = curie[len(cui_prefix):]  # trim out the prefix "UMLS:"
-                        cui_gene_id_map[cui] = identifier[len(gene_id_prefix):]  # trim out the prefix "NCBIGene:"
-                        break
+            for eq_id in curie_result.get("equivalent_identifiers"):
+                identifier = eq_id["identifier"]
+                if identifier.startswith(gene_id_prefix):
+                    cui = curie[len(cui_prefix):]  # trim out the prefix "UMLS:"
+                    cui_gene_id_map[cui] = identifier[len(gene_id_prefix):]  # trim out the prefix "NCBIGene:"
+                    break
 
         return cui_gene_id_map
 
-    # Create a querying task for each chunk of CUI collections, run them, collect and combine the results
-    connector = aiohttp.TCPConnector(limit=connector_limit)  #
-    async with aiohttp.ClientSession(connector=connector, raise_for_status=True) as session:
-        tasks = [_query(session, cui_chunk) for cui_chunk in iter_n(cui_collection, chunk_size)]
+    cui_gene_id_maps = [_query(cui_chunk) for cui_chunk in iter_n(cui_collection, chunk_size)]
+    # Merge all dictionaries in "cui_gene_id_maps"
+    merged_map = {cui: gene_id for cg_map in cui_gene_id_maps for cui, gene_id in cg_map.items()}
 
-        # "asyncio.gather()" will wait on the entire task set to be completed.
-        # If you want to process results greedily as they come in, loop over asyncio.as_completed()
-        cui_gene_id_maps = await asyncio.gather(*tasks, return_exceptions=True)  # "cui_gene_id_maps" is a list of dictionaries
-
-        # Merge all dictionaries in "cui_gene_id_maps"
-        merged_map = {cui: gene_id for cg_map in cui_gene_id_maps for cui, gene_id in cg_map.items()}
-        return merged_map
+    return merged_map
 
 
 ##################
@@ -723,7 +712,8 @@ def load_data(data_folder):
     retirement_mapping_df = add_cui_name_and_semtype_to_retirement_mapping(retirement_mapping_df, semmed_cui_name_semtype_df, umls_cui_name_semtype_df)
     semmed_df = map_retired_cuis(semmed_df, retirement_mapping_df)
 
-    semmed_df = await delete_equivalent_ncbigene_ids(semmed_df)
+    node_normalizer_cache = os.path.join(data_folder, "semmedVER43_2022_R_PREDICATION_NodeNorm.pickle")
+    semmed_df = delete_equivalent_ncbigene_ids(semmed_df, node_normalizer_cache=node_normalizer_cache, node_normalizer_output=None)
 
     semmed_df = add_document_id_column(semmed_df)
 
