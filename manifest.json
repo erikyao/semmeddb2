@@ -1,14 +1,17 @@
 {
-    "version": "0.1",
-    "requires" : "pyyaml",
+    "version": "0.2",
     "__metadata__" : {
-        "license_url" : "https://skr3.nlm.nih.gov/SemMedDB/",
-        "licence" : "CC BY 4.0",
-        "url" : "https://skr3.nlm.nih.gov/SemMedDB/"
+        "license_url" : "https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR.html",
+        "licence" : "UMLS Metathesaurus License",
+        "url" : "https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR.html"
     },
     "dumper" : {
-        "data_url" : ["https://dl.dropboxusercontent.com/s/im2ru5epalfr9lt/semmed_source.tar.gz",
-                      "https://metamap.nlm.nih.gov/Docs/SemanticTypes_2013AA.txt"],
+        "data_url" : [
+            "https://data.lhncbc.nlm.nih.gov/umls-restricted/ii/tools/SemRep_SemMedDB_SKR/semmedVER43_2022_R_PREDICATION.csv.gz",
+            "https://lhncbc.nlm.nih.gov/ii/tools/MetaMap/Docs/SemanticTypes_2018AB.txt",
+            "http://localhost:8080/dataupload/mysrc/semmeddb/MRCUI.RRF",
+            "http://localhost:8080/dataupload/mysrc/semmeddb/UMLS_CUI_Semtype.tsv"
+        ],
         "uncompress" : true,
         "release" : "version:get_release"
     },
