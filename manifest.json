@@ -7,6 +7,7 @@
     },
     "dumper" : {
         "data_url" : [
+            "http://localhost:8080/dataupload/mysrc/semmeddb/semmedVER43_2022_R_PREDICATION_clean_pyarrow_snappy.parquet",
             "http://localhost:8080/dataupload/mysrc/semmeddb/semmedVER43_2022_R_PREDICATION.csv",
             "http://localhost:8080/dataupload/mysrc/semmeddb/MRCUI.RRF",
             "http://localhost:8080/dataupload/mysrc/semmeddb/UMLS_CUI_Semtype.tsv",
@@ -18,6 +19,7 @@
     },
     "uploader" : {
         "parser" : "parser:load_data",
-        "on_duplicates" : "error"
+        "on_duplicates" : "error",
+        "mapping": "mapping:semmeddb_prediction_mapping"
     }
 }
