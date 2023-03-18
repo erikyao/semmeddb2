@@ -5,7 +5,7 @@ import requests
 import pandas as pd
 import numpy as np
 
-from typing import Dict, Set
+from typing import List, Dict, Set, Tuple, Union
 from collections.abc import Collection  # for type hints
 
 from biothings.utils.common import iter_n
@@ -23,6 +23,14 @@ SEMMED_FN_STEM = Path(SEMMED_TABLE_FN).stem  # string of "semmedVER43_2022_R_PRE
 SEMMED_TABLE_CACHE_FN = Path(SEMMED_FN_STEM + "_clean_pyarrow_snappy").with_suffix(".parquet")
 # Path("semmedVER43_2022_R_PREDICATION_NodeNorm.pickle")
 SEMMED_NODE_NORM_RESPONSE_CACHE_FN = Path(SEMMED_FN_STEM + "_NodeNorm").with_suffix(".pickle")
+
+"""
+Constants of column names
+"""
+INDEX_COLUMNS = ["OBJECT_CUI", "PREDICATE", "SUBJECT_CUI"]
+PREDICATION_COLUMNS = ["PREDICATION_ID", "PMID"]  # TODO add "SENTENCE_ID" when data is ready
+SUBJECT_COLUMNS = ["SUBJECT_NAME", "SUBJECT_SEMTYPE", "SUBJECT_NOVELTY", "SUBJECT_PREFIX"]
+OBJECT_COLUMNS = ["OBJECT_NAME", "OBJECT_SEMTYPE", "OBJECT_NOVELTY", "OBJECT_PREFIX"]
 
 
 ###################################
@@ -645,7 +653,7 @@ def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Collection
     """
 
     # Define the querying task for each chunk of CUIs
-    def _query(cui_chunk: Collection) -> dict:
+    def _query(cui_chunk: Collection) -> Dict:
         cui_gene_id_map = {}
 
         cui_prefix = "UMLS:"
@@ -687,53 +695,132 @@ def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Collection
 # PART 6: Parser #
 ##################
 
-def construct_document(row: pd.Series, semantic_type_map):
+def squeeze_list(lst: List):
     """
-    SemMedDB Database Details: https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
-
-    Name: PREDICATION table
-    Each record in this table identifies a unique predication. The data fields of our interest are as follows:
-
-    PREDICATION_ID  : Auto-generated primary key for each unique predication
-    SENTENCE_ID     : Foreign key to the SENTENCE table
-    PREDICATE       : The string representation of each predicate (for example TREATS, PROCESS_OF)
-    SUBJECT_CUI     : The CUI of the subject of the predication
-    SUBJECT_NAME    : The preferred name of the subject of the predication
-    SUBJECT_SEMTYPE : The semantic type of the subject of the predication
-    SUBJECT_NOVELTY : The novelty of the subject of the predication
-    OBJECT_CUI      : The CUI of the object of the predication
-    OBJECT_NAME     : The preferred name of the object of the predication
-    OBJECT_SEMTYPE  : The semantic type of the object of the predication
-    OBJECT_NOVELTY  : The novelty of the object of the predication
+    If lst is a singlet (i.e. having only one element), return the element. Otherwise return the itself as is.
     """
+    if len(lst) == 1:
+        return lst[0]
+    return lst
+
+
+def squeeze_series(series: pd.Series):
+    """
+    If series is a singlet (i.e. having only one element), return the element. Otherwise return the itself as a list.
+    """
+    if len(series) == 1:
+        return series[0]
+    return series.tolist()
+
+
+def construct_predication(predication_id, pmid) -> Dict:
+    content = {
+        "predication_id": predication_id,
+        "pmid": pmid
+    }
+    return content
+
+
+def construct_subject(subject_cui, subject_name, subject_semtype, subject_semtype_name, subject_novelty, subject_prefix) -> Dict:
+    content = {
+        subject_prefix: subject_cui,
+        "name": subject_name,
+        "semantic_type_abbreviation": subject_semtype,
+        "semantic_type_name": subject_semtype_name,
+        "novelty": subject_novelty
+    }
+    return content
+
+
+def construct_object(object_cui, object_name, object_semtype, object_semtype_name, object_novelty, object_prefix) -> Dict:
+    content = {
+        object_prefix: object_cui,
+        "name": object_name,
+        "semantic_type_abbreviation": object_semtype,
+        "semantic_type_name": object_semtype_name,
+        "novelty": object_novelty
+    }
+    return content
+
+
+def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], value_as_df: bool, semantic_type_map: Dict):
+    """
+    Make a document from a index tuple of ("SUBJECT_CUI", "PREDICATE", "OBJECT_CUI"), a value Series/DataFrame of ['PREDICATION_ID', 'SENTENCE_ID', 'PMID',
+        'SUBJECT_NAME', 'SUBJECT_SEMTYPE', 'SUBJECT_NOVELTY', 'OBJECT_NAME', 'OBJECT_SEMTYPE', 'OBJECT_NOVELTY', 'SUBJECT_PREFIX', 'OBJECT_PREFIX', '_ID'],
+        and a semantic type mapping.
+
+    If value_as_df is true, value is a DataFrame; otherwise a Series.
+    """
+    subject_cui, predicate, object_cui = index
+    _id = "-".join(index)
+
+    if value_as_df:
+        predication_list = [construct_predication(predication_id=pred_id, pmid=pmid) for (pred_id, pmid) in zip(value["PREDICATION_ID"], value["PMID"])]
+
+        subject_semtype_unique = value["SUBJECT_SEMTYPE"].unique()
+        subject_semtype_name_unique = [semantic_type_map.get(semtype, None) for semtype in subject_semtype_unique]
+        subject_dict = construct_subject(subject_cui=subject_cui,
+                                         subject_name=squeeze_series(value["SUBJECT_NAME"].unique()),
+                                         subject_semtype=squeeze_series(subject_semtype_unique),
+                                         subject_semtype_name=squeeze_list(subject_semtype_name_unique),
+                                         subject_novelty=squeeze_series(value["SUBJECT_NOVELTY"].unique()),
+                                         # value["SUBJECT_PREFIX"] should have only one unique element, "umls" or "ncbigene"
+                                         subject_prefix=value["SUBJECT_PREFIX"].unique()[0])
+
+        object_semtype_unique = value["OBJECT_SEMTYPE"].unique()
+        object_semtype_name_unique = [semantic_type_map.get(semtype, None) for semtype in object_semtype_unique]
+        object_dict = construct_object(object_cui=object_cui,
+                                       object_name=squeeze_series(value["OBJECT_NAME"].unique()),
+                                       object_semtype=squeeze_series(object_semtype_unique),
+                                       object_semtype_name=squeeze_list(object_semtype_name_unique),
+                                       object_novelty=squeeze_series(value["OBJECT_NOVELTY"].unique()),
+                                       # value["OBJECT_PREFIX"] should have only one element, "umls" or "ncbigene"
+                                       object_prefix=value["OBJECT_PREFIX"].unique()[0])
+    else:
+        predication_list = [construct_predication(predication_id=value["PREDICATION_ID"], pmid=value["PMID"])]
+        subject_dict = construct_subject(subject_cui=subject_cui,
+                                         subject_name=value["SUBJECT_NAME"],
+                                         subject_semtype=value["SUBJECT_SEMTYPE"],
+                                         subject_semtype_name=semantic_type_map.get(value["SUBJECT_SEMTYPE"], None),
+                                         subject_novelty=value["SUBJECT_NOVELTY"],
+                                         subject_prefix=value["SUBJECT_PREFIX"])
+        object_dict = construct_object(object_cui=object_cui,
+                                       object_name=value["OBJECT_NAME"],
+                                       object_semtype=value["OBJECT_SEMTYPE"],
+                                       object_semtype_name=semantic_type_map.get(value["OBJECT_SEMTYPE"], None),
+                                       object_novelty=value["OBJECT_NOVELTY"],
+                                       object_prefix=value["OBJECT_PREFIX"])
+
     doc = {
-        "_id": row["_ID"],
-        "predication_id": row["PREDICATION_ID"],
-        "pmid": row["PMID"],
-        "predicate": row["PREDICATE"],
-        "subject": {
-            row["SUBJECT_PREFIX"]: row["SUBJECT_CUI"],
-            "name": row["SUBJECT_NAME"],
-            "semantic_type_abbreviation": row["SUBJECT_SEMTYPE"],
-            "semantic_type_name": semantic_type_map.get(row["SUBJECT_SEMTYPE"], None),
-            "novelty": row["SUBJECT_NOVELTY"]
-        },
-        "object": {
-            row["OBJECT_PREFIX"]: row["OBJECT_CUI"],
-            "name": row["OBJECT_NAME"],
-            "semantic_type_abbreviation": row["OBJECT_SEMTYPE"],
-            "semantic_type_name": semantic_type_map.get(row["OBJECT_SEMTYPE"], None),
-            "novelty": row["OBJECT_NOVELTY"]
-        }
+        # "_id": row["_ID"],  # TODO row["_ID"] is no longer useful. Shall we stop creating this column?
+        "_id": _id,
+        "predicate": predicate,
+        "predication": predication_list,
+        "subject": subject_dict,
+        "object": object_dict,
     }
 
-    # del semtype_name field if we did not any mappings
+    # del semtype_name field if we did not find any mapping
     if not doc["subject"]["semantic_type_name"]:
         del doc["subject"]["semantic_type_name"]
     if not doc["object"]["semantic_type_name"]:
         del doc["object"]["semantic_type_name"]
 
     return doc
+
+
+def generate_documents(semmed_data_frame, semtype_name_map):
+    for index in set(semmed_data_frame.index):  # each index is a tuple of ("SUBJECT_CUI", "PREDICATE", "OBJECT_CUI")
+        sub_df = semmed_data_frame.loc[index]  # type(sub_df) is pandas.core.frame.DataFrame
+        if sub_df.shape[0] == 1:
+            value = sub_df.squeeze()  # convert one-row DataFrame into a Series (assuming multi-column)
+            value_as_df = False
+        else:
+            value = sub_df
+            value_as_df = True
+
+        doc = construct_document(index, value, value_as_df, semtype_name_map)
+        yield doc
 
 
 def load_data(data_folder, write_semmed_cache=False):
@@ -771,6 +858,9 @@ def load_data(data_folder, write_semmed_cache=False):
 
     semtype_mappings_df = read_semantic_type_mappings_data_frame(data_folder, SEMTYPE_MAPPING_FN)
     semtype_name_map = get_semtype_name_map(semtype_mappings_df)
-    for _, row in semmed_df.iterrows():
-        doc = construct_document(row, semtype_name_map)
-        yield doc
+
+    semmed_df = semmed_df.set_index(["SUBJECT_CUI", "PREDICATE", "OBJECT_CUI"]).sort_index()
+    yield from generate_documents(semmed_df, semtype_name_map)
+
+
+
