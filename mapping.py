@@ -4,12 +4,15 @@ def semmeddb_prediction_mapping(cls):
             "normalizer": "keyword_lowercase_normalizer",
             "type": "keyword"
         },
-        "predication_id": {
-            "normalizer": "keyword_lowercase_normalizer",
-            "type": "keyword"
-        },
-        "pmid": {
-            "type": "integer"
+        "predication": {
+            "properties": {
+                "predication_id": {
+                    "type": "keyword"
+                },
+                "pmid": {
+                    "type": "integer"
+                }
+            }
         },
         "subject": {
             "properties": {
