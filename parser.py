@@ -27,10 +27,10 @@ SEMMED_NODE_NORM_RESPONSE_CACHE_FN = Path(SEMMED_FN_STEM + "_NodeNorm").with_suf
 """
 Constants of column names
 """
-INDEX_COLUMNS = ["OBJECT_CUI", "PREDICATE", "SUBJECT_CUI"]
+INDEX_COLUMNS = ["SUBJECT_CUI", "PREDICATE", "OBJECT_CUI"]
 PREDICATION_COLUMNS = ["PREDICATION_ID", "PMID"]  # TODO add "SENTENCE_ID" when data is ready
-SUBJECT_COLUMNS = ["SUBJECT_NAME", "SUBJECT_SEMTYPE", "SUBJECT_NOVELTY", "SUBJECT_PREFIX"]
-OBJECT_COLUMNS = ["OBJECT_NAME", "OBJECT_SEMTYPE", "OBJECT_NOVELTY", "OBJECT_PREFIX"]
+# SUBJECT_COLUMNS = ["SUBJECT_NAME", "SUBJECT_SEMTYPE", "SUBJECT_NOVELTY", "SUBJECT_PREFIX"]
+# OBJECT_COLUMNS = ["OBJECT_NAME", "OBJECT_SEMTYPE", "OBJECT_NOVELTY", "OBJECT_PREFIX"]
 
 
 ###################################
@@ -697,7 +697,7 @@ def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Collection
 
 def squeeze_list(lst: List):
     """
-    If lst is a singlet (i.e. having only one element), return the element. Otherwise return the itself as is.
+    If lst is a singlet (i.e. having only one element), return the element. Otherwise, return itself as is.
     """
     if len(lst) == 1:
         return lst[0]
@@ -706,7 +706,7 @@ def squeeze_list(lst: List):
 
 def squeeze_series(series: pd.Series):
     """
-    If series is a singlet (i.e. having only one element), return the element. Otherwise return the itself as a list.
+    If series is a singlet (i.e. having only one element), return the element. Otherwise, return itself as a list.
     """
     if len(series) == 1:
         return series[0]
@@ -714,38 +714,33 @@ def squeeze_series(series: pd.Series):
 
 
 def construct_predication(predication_id, pmid) -> Dict:
-    content = {
+    """
+    Create the content for the "predication" field of the yielded docs.
+    """
+    predication = {
         "predication_id": predication_id,
         "pmid": pmid
     }
-    return content
+    return predication
 
 
-def construct_subject(subject_cui, subject_name, subject_semtype, subject_semtype_name, subject_novelty, subject_prefix) -> Dict:
-    content = {
-        subject_prefix: subject_cui,
-        "name": subject_name,
-        "semantic_type_abbreviation": subject_semtype,
-        "semantic_type_name": subject_semtype_name,
-        "novelty": subject_novelty
+def construct_entity(cui, name, semtype, semtype_name, novelty, cui_prefix) -> Dict:
+    """
+    Create the content for the "subject" or "object" field of the yielded docs.
+    """
+    entity = {
+        cui_prefix: cui,
+        "name": name,
+        "semantic_type_abbreviation": semtype,
+        "semantic_type_name": semtype_name,
+        "novelty": novelty
     }
-    return content
-
-
-def construct_object(object_cui, object_name, object_semtype, object_semtype_name, object_novelty, object_prefix) -> Dict:
-    content = {
-        object_prefix: object_cui,
-        "name": object_name,
-        "semantic_type_abbreviation": object_semtype,
-        "semantic_type_name": object_semtype_name,
-        "novelty": object_novelty
-    }
-    return content
+    return entity
 
 
 def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], value_as_df: bool, semantic_type_map: Dict):
     """
-    Make a document from a index tuple of ("SUBJECT_CUI", "PREDICATE", "OBJECT_CUI"), a value Series/DataFrame of ['PREDICATION_ID', 'SENTENCE_ID', 'PMID',
+    Make a document from an index tuple of ("SUBJECT_CUI", "PREDICATE", "OBJECT_CUI"), a value Series/DataFrame of ['PREDICATION_ID', 'SENTENCE_ID', 'PMID',
         'SUBJECT_NAME', 'SUBJECT_SEMTYPE', 'SUBJECT_NOVELTY', 'OBJECT_NAME', 'OBJECT_SEMTYPE', 'OBJECT_NOVELTY', 'SUBJECT_PREFIX', 'OBJECT_PREFIX', '_ID'],
         and a semantic type mapping.
 
@@ -759,37 +754,37 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
 
         subject_semtype_unique = value["SUBJECT_SEMTYPE"].unique()
         subject_semtype_name_unique = [semantic_type_map.get(semtype, None) for semtype in subject_semtype_unique]
-        subject_dict = construct_subject(subject_cui=subject_cui,
-                                         subject_name=squeeze_series(value["SUBJECT_NAME"].unique()),
-                                         subject_semtype=squeeze_series(subject_semtype_unique),
-                                         subject_semtype_name=squeeze_list(subject_semtype_name_unique),
-                                         subject_novelty=squeeze_series(value["SUBJECT_NOVELTY"].unique()),
-                                         # value["SUBJECT_PREFIX"] should have only one unique element, "umls" or "ncbigene"
-                                         subject_prefix=value["SUBJECT_PREFIX"].unique()[0])
+        subject_dict = construct_entity(cui=subject_cui,
+                                        name=squeeze_series(value["SUBJECT_NAME"].unique()),
+                                        semtype=squeeze_series(subject_semtype_unique),
+                                        semtype_name=squeeze_list(subject_semtype_name_unique),
+                                        novelty=squeeze_series(value["SUBJECT_NOVELTY"].unique()),
+                                        # value["SUBJECT_PREFIX"] should have only one unique element, "umls" or "ncbigene"
+                                        cui_prefix=value["SUBJECT_PREFIX"].unique()[0])
 
         object_semtype_unique = value["OBJECT_SEMTYPE"].unique()
         object_semtype_name_unique = [semantic_type_map.get(semtype, None) for semtype in object_semtype_unique]
-        object_dict = construct_object(object_cui=object_cui,
-                                       object_name=squeeze_series(value["OBJECT_NAME"].unique()),
-                                       object_semtype=squeeze_series(object_semtype_unique),
-                                       object_semtype_name=squeeze_list(object_semtype_name_unique),
-                                       object_novelty=squeeze_series(value["OBJECT_NOVELTY"].unique()),
+        object_dict = construct_entity(cui=object_cui,
+                                       name=squeeze_series(value["OBJECT_NAME"].unique()),
+                                       semtype=squeeze_series(object_semtype_unique),
+                                       semtype_name=squeeze_list(object_semtype_name_unique),
+                                       novelty=squeeze_series(value["OBJECT_NOVELTY"].unique()),
                                        # value["OBJECT_PREFIX"] should have only one element, "umls" or "ncbigene"
-                                       object_prefix=value["OBJECT_PREFIX"].unique()[0])
+                                       cui_prefix=value["OBJECT_PREFIX"].unique()[0])
     else:
         predication_list = [construct_predication(predication_id=value["PREDICATION_ID"], pmid=value["PMID"])]
-        subject_dict = construct_subject(subject_cui=subject_cui,
-                                         subject_name=value["SUBJECT_NAME"],
-                                         subject_semtype=value["SUBJECT_SEMTYPE"],
-                                         subject_semtype_name=semantic_type_map.get(value["SUBJECT_SEMTYPE"], None),
-                                         subject_novelty=value["SUBJECT_NOVELTY"],
-                                         subject_prefix=value["SUBJECT_PREFIX"])
-        object_dict = construct_object(object_cui=object_cui,
-                                       object_name=value["OBJECT_NAME"],
-                                       object_semtype=value["OBJECT_SEMTYPE"],
-                                       object_semtype_name=semantic_type_map.get(value["OBJECT_SEMTYPE"], None),
-                                       object_novelty=value["OBJECT_NOVELTY"],
-                                       object_prefix=value["OBJECT_PREFIX"])
+        subject_dict = construct_entity(cui=subject_cui,
+                                        name=value["SUBJECT_NAME"],
+                                        semtype=value["SUBJECT_SEMTYPE"],
+                                        semtype_name=semantic_type_map.get(value["SUBJECT_SEMTYPE"], None),
+                                        novelty=value["SUBJECT_NOVELTY"],
+                                        cui_prefix=value["SUBJECT_PREFIX"])
+        object_dict = construct_entity(cui=object_cui,
+                                       name=value["OBJECT_NAME"],
+                                       semtype=value["OBJECT_SEMTYPE"],
+                                       semtype_name=semantic_type_map.get(value["OBJECT_SEMTYPE"], None),
+                                       novelty=value["OBJECT_NOVELTY"],
+                                       cui_prefix=value["OBJECT_PREFIX"])
 
     doc = {
         # "_id": row["_ID"],  # TODO row["_ID"] is no longer useful. Shall we stop creating this column?
@@ -859,8 +854,5 @@ def load_data(data_folder, write_semmed_cache=False):
     semtype_mappings_df = read_semantic_type_mappings_data_frame(data_folder, SEMTYPE_MAPPING_FN)
     semtype_name_map = get_semtype_name_map(semtype_mappings_df)
 
-    semmed_df = semmed_df.set_index(["SUBJECT_CUI", "PREDICATE", "OBJECT_CUI"]).sort_index()
+    semmed_df = semmed_df.set_index(INDEX_COLUMNS).sort_index()
     yield from generate_documents(semmed_df, semtype_name_map)
-
-
-
