@@ -5,10 +5,10 @@ def semmeddb_prediction_mapping(cls):
             "type": "keyword"
         },
         "pmid_count": {
-            "type": "keyword"
+            "type": "integer"
         },
         "predication_count": {
-            "type": "keyword"
+            "type": "integer"
         },
         "predication": {
             "properties": {
@@ -16,7 +16,7 @@ def semmeddb_prediction_mapping(cls):
                     "type": "keyword"
                 },
                 "pmid": {
-                    "type": "integer"
+                    "type": "keyword"
                 }
             }
         },
