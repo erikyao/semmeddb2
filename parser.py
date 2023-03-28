@@ -28,7 +28,7 @@ SEMMED_NODE_NORM_RESPONSE_CACHE_FN = Path(SEMMED_FN_STEM + "_NodeNorm").with_suf
 Constants of column names
 """
 INDEX_COLUMNS = ["SUBJECT_CUI", "PREDICATE", "OBJECT_CUI"]
-PREDICATION_COLUMNS = ["PREDICATION_ID", "PMID"]  # TODO add "SENTENCE_ID" when data is ready
+# PREDICATION_COLUMNS = ["PREDICATION_ID", "PMID", "SENTENCE_ID"]
 # SUBJECT_COLUMNS = ["SUBJECT_NAME", "SUBJECT_SEMTYPE", "SUBJECT_NOVELTY", "SUBJECT_PREFIX"]
 # OBJECT_COLUMNS = ["OBJECT_NAME", "OBJECT_SEMTYPE", "OBJECT_NOVELTY", "OBJECT_PREFIX"]
 
@@ -750,27 +750,30 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
     _id = "-".join(index)
 
     if value_as_df:
-        predication_list = [construct_predication(predication_id=pred_id, pmid=pmid) for (pred_id, pmid) in zip(value["PREDICATION_ID"], value["PMID"])]
-
         subject_semtype_unique = value["SUBJECT_SEMTYPE"].unique()
         subject_semtype_name_unique = [semantic_type_map.get(semtype, None) for semtype in subject_semtype_unique]
+        object_semtype_unique = value["OBJECT_SEMTYPE"].unique()
+        object_semtype_name_unique = [semantic_type_map.get(semtype, None) for semtype in object_semtype_unique]
+
+        predication_list = [construct_predication(predication_id=pred_id, pmid=pmid) for (pred_id, pmid) in zip(value["PREDICATION_ID"], value["PMID"])]
         subject_dict = construct_entity(cui=subject_cui,
                                         name=squeeze_series(value["SUBJECT_NAME"].unique()),
                                         semtype=squeeze_series(subject_semtype_unique),
                                         semtype_name=squeeze_list(subject_semtype_name_unique),
-                                        novelty=squeeze_series(value["SUBJECT_NOVELTY"].unique()),
+                                        # value["SUBJECT_NOVELTY"] should always be 1
+                                        novelty=value["SUBJECT_NOVELTY"][0],
                                         # value["SUBJECT_PREFIX"] should have only one unique element, "umls" or "ncbigene"
-                                        cui_prefix=value["SUBJECT_PREFIX"].unique()[0])
-
-        object_semtype_unique = value["OBJECT_SEMTYPE"].unique()
-        object_semtype_name_unique = [semantic_type_map.get(semtype, None) for semtype in object_semtype_unique]
+                                        cui_prefix=value["SUBJECT_PREFIX"][0])
         object_dict = construct_entity(cui=object_cui,
                                        name=squeeze_series(value["OBJECT_NAME"].unique()),
                                        semtype=squeeze_series(object_semtype_unique),
                                        semtype_name=squeeze_list(object_semtype_name_unique),
-                                       novelty=squeeze_series(value["OBJECT_NOVELTY"].unique()),
+                                       # value["OBJECT_NOVELTY"] should always be 1
+                                       novelty=value["OBJECT_NOVELTY"][0],
                                        # value["OBJECT_PREFIX"] should have only one element, "umls" or "ncbigene"
-                                       cui_prefix=value["OBJECT_PREFIX"].unique()[0])
+                                       cui_prefix=value["OBJECT_PREFIX"][0])
+        pmid_count = value["PMID"].unique().size
+        predication_count = len(predication_list)
     else:
         predication_list = [construct_predication(predication_id=value["PREDICATION_ID"], pmid=value["PMID"])]
         subject_dict = construct_entity(cui=subject_cui,
@@ -785,12 +788,17 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
                                        semtype_name=semantic_type_map.get(value["OBJECT_SEMTYPE"], None),
                                        novelty=value["OBJECT_NOVELTY"],
                                        cui_prefix=value["OBJECT_PREFIX"])
+        pmid_count = 1
+        predication_count = 1
+
 
     doc = {
         # "_id": row["_ID"],  # TODO row["_ID"] is no longer useful. Shall we stop creating this column?
         "_id": _id,
         "predicate": predicate,
         "predication": predication_list,
+        "pmid_count": pmid_count,
+        "predication_count": predication_count,
         "subject": subject_dict,
         "object": object_dict,
     }
