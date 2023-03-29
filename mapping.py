@@ -17,6 +17,12 @@ def semmeddb_prediction_mapping(cls):
                 },
                 "pmid": {
                     "type": "keyword"
+                },
+                "sentence_id": {
+                    "type": "keyword"
+                },
+                "sentence": {
+                    "type": "text"
                 }
             }
         },
