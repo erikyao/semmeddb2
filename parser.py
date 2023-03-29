@@ -175,18 +175,26 @@ def read_cui_name_and_semtype_from_umls(filepath) -> pd.DataFrame:
 # PART 4: Load SemMed Data #
 ############################
 
-def read_semmed_sentence_map(filepath) -> Dict:
+def read_semmed_sentence_map(filepath, semmed_predication_data_frame: Union[None, pd.DataFrame] = None) -> Dict:
     sentence_map = dict()
 
     # See https://docs.python.org/3/library/csv.html#csv.reader for why newline is set to empty
     with open(filepath, newline="") as csvfile:
         reader = csv.reader(csvfile, delimiter=",", escapechar="\\")
-        for row in reader:
-            # See column description of the SENTENCE table at https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
-            #   Note that column order in CSV is different from the SQL table.
-            # Column 0, "SENTENCE_ID", Auto-generated primary key for each sentence
-            # Column 5, "SENTENCE", The actual string or text of the sentence
-            sentence_map[int(row[0])] = row[5]
+
+        if semmed_predication_data_frame is None:
+            for row in reader:
+                # See column description of the SENTENCE table at https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
+                #   Note that column order in CSV is different from the SQL table.
+                # Column 0, "SENTENCE_ID", Auto-generated primary key for each sentence
+                # Column 5, "SENTENCE", The actual string or text of the sentence
+                sentence_map[int(row[0])] = row[5]
+        else:
+            pred_sentence_ids = set(semmed_predication_data_frame["SENTENCE_ID"].unique())
+            for row in reader:
+                sid = int(row[0])
+                if sid in pred_sentence_ids:
+                    sentence_map[sid] = row[5]
 
     return sentence_map
 
@@ -969,9 +977,7 @@ def load_data(data_folder, write_semmed_cache=False):
     semtype_name_map = get_semtype_name_map(semtype_mappings_df)
 
     logging.info(f"Reading sentence table {semmed_pred_path} ...")
-    semmed_sentence_map = read_semmed_sentence_map(filepath=semmed_sentence_path)
-    logging.info(f"Filtering sentence table {semmed_pred_path} ...")
-    semmed_sentence_map = filter_semmed_sentence_map(semmed_sentence_map, semmed_pred_df)
+    semmed_sentence_map = read_semmed_sentence_map(filepath=semmed_sentence_path, semmed_predication_data_frame=semmed_pred_df)
 
     logging.info(f"Setting index on predication data frame ...")
     semmed_pred_df = semmed_pred_df.set_index(INDEX_COLUMNS).sort_index()
