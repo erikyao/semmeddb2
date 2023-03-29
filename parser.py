@@ -1,5 +1,6 @@
 import os
 import csv
+import logging
 from pathlib import Path
 import pickle
 import requests
@@ -948,9 +949,11 @@ def load_data(data_folder, write_semmed_cache=False):
 
     # Always read the cache if available
     if semmed_pred_cache_path and os.path.exists(semmed_pred_cache_path):
+        logging.info(f"Reading predication cache {semmed_pred_cache_path} ...")
         semmed_pred_df = read_semmed_predication_parquet_cache(path=semmed_pred_cache_path)
     else:
         # Start the data cleaning procedure if cache not available
+        logging.info(f"Reading predication table {semmed_pred_path} ...")
         semmed_pred_df = construct_semmed_predication_data_frame(semmed_predication_filepath=semmed_pred_path,
                                                                  mrcui_filepath=mrcui_path,
                                                                  umls_cui_name_semtype_filepath=umls_cui_name_semtype_path,
@@ -959,13 +962,18 @@ def load_data(data_folder, write_semmed_cache=False):
 
     # Write cache only when `write_semmed_cache` is set
     if write_semmed_cache:
+        logging.info(f"Writing predication cache {semmed_pred_cache_path} ...")
         write_semmed_predication_parquet_cache(semmed_pred_df, path=semmed_pred_cache_path)
 
     semtype_mappings_df = read_semantic_type_mappings_data_frame(filepath=semtype_mapping_path)
     semtype_name_map = get_semtype_name_map(semtype_mappings_df)
 
+    logging.info(f"Reading sentence table {semmed_pred_path} ...")
     semmed_sentence_map = read_semmed_sentence_map(filepath=semmed_sentence_path)
+    logging.info(f"Filtering sentence table {semmed_pred_path} ...")
     semmed_sentence_map = filter_semmed_sentence_map(semmed_sentence_map, semmed_pred_df)
 
+    logging.info(f"Setting index on predication data frame ...")
     semmed_pred_df = semmed_pred_df.set_index(INDEX_COLUMNS).sort_index()
+    logging.info(f"Generating documents from predication data frame ...")
     yield from generate_documents(semmed_pred_df, semtype_name_map, semmed_sentence_map)
