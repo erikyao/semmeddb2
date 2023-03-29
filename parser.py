@@ -860,7 +860,10 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
                                        novelty=value["OBJECT_NOVELTY"][0],
                                        # value["OBJECT_PREFIX"] should have only one element, "umls" or "ncbigene"
                                        cui_prefix=value["OBJECT_PREFIX"][0])
-        pmid_count = value["PMID"].unique().size
+        # Here .unique() returns a pandas.core.arrays.integer.IntegerArray, whose .size property somehow is a numpy.int64 (ridiculous!),
+        #   which cannot be encoded by PyMongo Bson
+        # pmid_count = value["PMID"].unique().size  # DO NOT USE THIS!
+        pmid_count = len(value["PMID"].unique())
         predication_count = len(predication_list)
     else:
         predication_list = [construct_predication(predication_id=value["PREDICATION_ID"],
