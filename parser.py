@@ -1,4 +1,5 @@
 import os
+import csv
 from pathlib import Path
 import pickle
 import requests
@@ -173,48 +174,73 @@ def read_cui_name_and_semtype_from_umls(filepath) -> pd.DataFrame:
 # PART 4: Load SemMed Data #
 ############################
 
-def read_semmed_sentence_data_frame(filepath) -> pd.DataFrame:
-    separator = ","
-    escapechar = "\\"  # single backslash, see https://github.com/biothings/semmeddb/issues/10
-    column_info = [
-        # See column description of the SENTENCE table at https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
-        # Note that column order in CSV is different from the SQL table.
-        (0, "SENTENCE_ID", "UInt32"),  # Auto-generated primary key for each sentence
-        # (1, "PMID", "UInt32"),
-        # (2, "TYPE", "string"),  # 'ti' for the title of the citation, 'ab' for the abstract
-        # (3, "NUMBER", "string"),  # The location of the sentence within the title or abstract
-        # (4, "SENT_START_INDEX", "UInt32"),  # The character position within the text of the MEDLINE citation of the first character of the sentence
-        (5, "SENTENCE", "string"),  # The actual string or text of the sentence
-        # (6, "SENT_END_INDEX", "UInt32"),  # The character position within the text of the MEDLINE citation of the last character of the sentence
-        # (7, "SECTION_HEADER", "string"),  # Section header name of structured abstract
-        # (8, "NORMALIZED_SECTION_HEADER", "string"),  # Normalized section header name
-    ]
+def read_semmed_sentence_map(filepath) -> Dict:
+    sentence_map = dict()
 
-    column_indices = [e[0] for e in column_info]
-    column_names = [e[1] for e in column_info]
-    column_dtypes = {e[1]: e[2] for e in column_info}
-    data_frame = pd.read_csv(filepath, sep=separator, names=column_names, usecols=column_indices, dtype=column_dtypes, escapechar=escapechar)
+    # See https://docs.python.org/3/library/csv.html#csv.reader for why newline is set to empty
+    with open(filepath, newline="") as csvfile:
+        reader = csv.reader(csvfile, delimiter=",", escapechar="\\")
+        for row in reader:
+            # See column description of the SENTENCE table at https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
+            #   Note that column order in CSV is different from the SQL table.
+            # Column 0, "SENTENCE_ID", Auto-generated primary key for each sentence
+            # Column 5, "SENTENCE", The actual string or text of the sentence
+            sentence_map[int(row[0])] = row[5]
 
-    data_frame = data_frame.astype({
-        "SENTENCE": "string[pyarrow]"
-    })
-
-    return data_frame
+    return sentence_map
 
 
-def get_semmed_sentence_map(semmed_sentence_data_frame: pd.DataFrame, semmed_predication_data_frame: pd.DataFrame) -> set:
-    """
-    Subset the sentence data frame by unique sentence IDs in the predication data frame, and transform the sentence two-column data frame into a dictionary of
-    <SENTENCE_ID: int, SENTENCE: string>.
-    """
-    # Drop sentence rows whose SENTENCE_ID is not present in the predication data frame
-    sentence_ids = set(semmed_predication_data_frame["SENTENCE_ID"].unique())
-    presence_flags = semmed_sentence_data_frame["SENTENCE_ID"].isin(sentence_ids)
-    absence_index = semmed_sentence_data_frame.index[~presence_flags]
-    semmed_sentence_data_frame.drop(index=absence_index, inplace=True)  # drop in-place to save memory
+def filter_semmed_sentence_map(sentence_map: Dict, semmed_predication_data_frame: pd.DataFrame) -> Dict:
+    pred_sentence_ids = set(semmed_predication_data_frame["SENTENCE_ID"].unique())
+    unwanted_sentence_ids = set(sentence_map).difference(pred_sentence_ids)
+    for sid in unwanted_sentence_ids:
+        del sentence_map[sid]
+    return sentence_map
 
-    semmed_sentence_mapping = semmed_sentence_data_frame.set_index("SENTENCE_ID").to_dict()["SENTENCE"]
-    return semmed_sentence_mapping
+
+# def read_semmed_sentence_data_frame(filepath) -> pd.DataFrame:
+#     separator = ","
+#     escapechar = "\\"  # single backslash, see https://github.com/biothings/semmeddb/issues/10
+#     column_info = [
+#         # See column description of the SENTENCE table at https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
+#         # Note that column order in CSV is different from the SQL table.
+#         (0, "SENTENCE_ID", "UInt32"),  # Auto-generated primary key for each sentence
+#         # (1, "PMID", "UInt32"),
+#         # (2, "TYPE", "string"),  # 'ti' for the title of the citation, 'ab' for the abstract
+#         # (3, "NUMBER", "string"),  # The location of the sentence within the title or abstract
+#         # (4, "SENT_START_INDEX", "UInt32"),  # The character position within the text of the MEDLINE citation of the first character of the sentence
+#         (5, "SENTENCE", "string"),  # The actual string or text of the sentence
+#         # (6, "SENT_END_INDEX", "UInt32"),  # The character position within the text of the MEDLINE citation of the last character of the sentence
+#         # (7, "SECTION_HEADER", "string"),  # Section header name of structured abstract
+#         # (8, "NORMALIZED_SECTION_HEADER", "string"),  # Normalized section header name
+#     ]
+#
+#     column_indices = [e[0] for e in column_info]
+#     column_names = [e[1] for e in column_info]
+#     column_dtypes = {e[1]: e[2] for e in column_info}
+#     data_frame = pd.read_csv(filepath, sep=separator, names=column_names, usecols=column_indices, dtype=column_dtypes, escapechar=escapechar)
+#
+#     data_frame = data_frame.astype({
+#         "SENTENCE": "string[pyarrow]"
+#     })
+#
+#     return data_frame
+#
+#
+# def get_semmed_sentence_map(semmed_sentence_data_frame: pd.DataFrame, semmed_predication_data_frame: pd.DataFrame) -> set:
+#     """
+#     Subset the sentence data frame by unique sentence IDs in the predication data frame, and transform the sentence two-column data frame into a dictionary of
+#     <SENTENCE_ID: int, SENTENCE: string>.
+#     """
+#     # Drop sentence rows whose SENTENCE_ID is not present in the predication data frame
+#     sentence_ids = set(semmed_predication_data_frame["SENTENCE_ID"].unique())
+#     presence_flags = semmed_sentence_data_frame["SENTENCE_ID"].isin(sentence_ids)
+#     absence_index = semmed_sentence_data_frame.index[~presence_flags]
+#     # TODO line below would cause "pyarrow.lib.ArrowInvalid: offset overflow while concatenating arrays"
+#     semmed_sentence_data_frame.drop(index=absence_index, inplace=True)  # drop in-place to save memory
+#
+#     semmed_sentence_mapping = semmed_sentence_data_frame.set_index("SENTENCE_ID").to_dict()["SENTENCE"]
+#     return semmed_sentence_mapping
 
 
 def read_semmed_predication_data_frame(filepath) -> pd.DataFrame:
@@ -938,8 +964,8 @@ def load_data(data_folder, write_semmed_cache=False):
     semtype_mappings_df = read_semantic_type_mappings_data_frame(filepath=semtype_mapping_path)
     semtype_name_map = get_semtype_name_map(semtype_mappings_df)
 
-    semmed_sentence_df = read_semmed_sentence_data_frame(filepath=semmed_sentence_path)
-    semmed_sentence_map = get_semmed_sentence_map(semmed_sentence_df, semmed_pred_df)
+    semmed_sentence_map = read_semmed_sentence_map(filepath=semmed_sentence_path)
+    semmed_sentence_map = filter_semmed_sentence_map(semmed_sentence_map, semmed_pred_df)
 
     semmed_pred_df = semmed_pred_df.set_index(INDEX_COLUMNS).sort_index()
     yield from generate_documents(semmed_pred_df, semtype_name_map, semmed_sentence_map)
