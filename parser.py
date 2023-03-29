@@ -799,9 +799,10 @@ def construct_predication(predication_id, pmid, sentence_id, sentence) -> Dict:
     Create the content for the "predication" field of the yielded docs.
     """
     predication = {
-        "predication_id": predication_id,
-        "pmid": pmid,
-        "sentence_id": sentence_id,
+        # convert numpy.UInt32 to python int; otherwise PyMongo's bson module may fail to encode these fields
+        "predication_id": int(predication_id),
+        "pmid": int(pmid),
+        "sentence_id": int(sentence_id),
         "sentence": sentence
     }
     return predication
@@ -816,7 +817,7 @@ def construct_entity(cui, name, semtype, semtype_name, novelty, cui_prefix) -> D
         "name": name,
         "semantic_type_abbreviation": semtype,
         "semantic_type_name": semtype_name,
-        "novelty": novelty
+        "novelty": int(novelty)  # convert numpy.Int8 to python int
     }
     return entity
 
