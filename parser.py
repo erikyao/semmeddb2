@@ -22,6 +22,7 @@ SEMTYPE_MAPPING_FN = "SemanticTypes_2018AB.txt"
 UMLS_PREFERRED_CUI_NAME_SEMTYPE_FN = "UMLS_CUI_Semtype_2022AB.tsv"
 
 SEMMED_PREDICATION_FN = "semmedVER43_2023_R_PREDICATION.116080.csv"
+SEMMED_PREDICATION_AUX_FN = "semmedVER43_2023_R_PREDICATION_AUX.116080.csv"
 SEMMED_SENTENCE_FN = "semmedVER43_2023_R_SENTENCE.116080.csv"
 
 CACHE_DIR = "CACHE"
@@ -175,6 +176,57 @@ def read_cui_name_and_semtype_from_umls(filepath) -> pd.DataFrame:
 # PART 4: Load SemMed Data #
 ############################
 
+def read_semmed_predication_aux_map(filepath, semmed_predication_data_frame: Union[None, pd.DataFrame] = None) -> Dict:
+    """
+    Read the PREDICATION AUX table and return a dictionary of
+      <PREDICATION_ID, <SUBJECT_TEXT, SUBJECT_SCORE, OBJECT_TEXT, OBJECT_SCORE>>. E.g.
+
+        aux_map = {
+            10592604: {
+                'SUBJECT_TEXT': 'arboviruses',
+                'SUBJECT_SCORE': 840,
+                'OBJECT_TEXT': 'brown hares',
+                'OBJECT_SCORE': 884
+            },
+            10592697: {
+                'SUBJECT_TEXT': 'Tahyna virus',
+                'SUBJECT_SCORE': 1000,
+                'OBJECT_TEXT': 'California encephalitis serogroup',
+                'OBJECT_SCORE': 901
+            }
+        }
+    """
+    aux_map = dict()
+
+    # See https://docs.python.org/3/library/csv.html#csv.reader for why newline is set to empty
+    with open(filepath, newline="") as csvfile:
+        reader = csv.reader(csvfile, delimiter=",", escapechar="\\")
+
+        for row in reader:
+            # See column description of the PREDICATION_AUX table at https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
+            # Column 1, "PREDICATION_ID", Auto-generated primary key for each PREDICATION
+            # Column 2, "SUBJECT_TEXT", Text that maps to the subject
+            # Column 7, "SUBJECT_SCORE", Confidence score of the mapping between the subject string and the subject concept (range 0~1000)
+            # Column 11, "OBJECT_TEXT", Text that maps to the object
+            # Column 16, "OBJECT_SCORE", Confidence score of the mapping between the object string and the object concept (range 0~1000)
+            pid = int(row[1])
+            aux = {
+                "subject_text": row[2],
+                "subject_score": int(row[7]),
+                "object_text": row[11],
+                "object_score": int(row[16])
+            }
+            aux_map[pid] = aux
+
+    if semmed_predication_data_frame is not None:
+        wanted_pred_ids = set(semmed_predication_data_frame["PREDICATION_ID"].unique())
+        for pid in set(aux_map):
+            if pid not in wanted_pred_ids:
+                del aux_map[pid]
+
+    return aux_map
+
+
 def read_semmed_sentence_map(filepath, semmed_predication_data_frame: Union[None, pd.DataFrame] = None) -> Dict:
     sentence_map = dict()
 
@@ -182,74 +234,22 @@ def read_semmed_sentence_map(filepath, semmed_predication_data_frame: Union[None
     with open(filepath, newline="") as csvfile:
         reader = csv.reader(csvfile, delimiter=",", escapechar="\\")
 
-        if semmed_predication_data_frame is None:
-            for row in reader:
-                # See column description of the SENTENCE table at https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
-                #   Note that column order in CSV is different from the SQL table.
-                # Column 0, "SENTENCE_ID", Auto-generated primary key for each sentence
-                # Column 5, "SENTENCE", The actual string or text of the sentence
-                sentence_map[int(row[0])] = row[5]
-        else:
-            pred_sentence_ids = set(semmed_predication_data_frame["SENTENCE_ID"].unique())
-            for row in reader:
-                sid = int(row[0])
-                if sid in pred_sentence_ids:
-                    sentence_map[sid] = row[5]
+        for row in reader:
+            # See column description of the SENTENCE table at https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
+            #   Note that column order in CSV is different from the SQL table.
+            # Column 0, "SENTENCE_ID", Auto-generated primary key for each sentence
+            # Column 5, "SENTENCE", The actual string or text of the sentence
+            sid = int(row[0])
+            sentence = row[5]
+            sentence_map[sid] = sentence
+
+    if semmed_predication_data_frame is not None:
+        wanted_sentence_ids = set(semmed_predication_data_frame["SENTENCE_ID"].unique())
+        for sid in set(sentence_map):
+            if sid not in wanted_sentence_ids:
+                del sentence_map[sid]
 
     return sentence_map
-
-
-def filter_semmed_sentence_map(sentence_map: Dict, semmed_predication_data_frame: pd.DataFrame) -> Dict:
-    pred_sentence_ids = set(semmed_predication_data_frame["SENTENCE_ID"].unique())
-    unwanted_sentence_ids = set(sentence_map).difference(pred_sentence_ids)
-    for sid in unwanted_sentence_ids:
-        del sentence_map[sid]
-    return sentence_map
-
-
-# def read_semmed_sentence_data_frame(filepath) -> pd.DataFrame:
-#     separator = ","
-#     escapechar = "\\"  # single backslash, see https://github.com/biothings/semmeddb/issues/10
-#     column_info = [
-#         # See column description of the SENTENCE table at https://lhncbc.nlm.nih.gov/ii/tools/SemRep_SemMedDB_SKR/dbinfo.html
-#         # Note that column order in CSV is different from the SQL table.
-#         (0, "SENTENCE_ID", "UInt32"),  # Auto-generated primary key for each sentence
-#         # (1, "PMID", "UInt32"),
-#         # (2, "TYPE", "string"),  # 'ti' for the title of the citation, 'ab' for the abstract
-#         # (3, "NUMBER", "string"),  # The location of the sentence within the title or abstract
-#         # (4, "SENT_START_INDEX", "UInt32"),  # The character position within the text of the MEDLINE citation of the first character of the sentence
-#         (5, "SENTENCE", "string"),  # The actual string or text of the sentence
-#         # (6, "SENT_END_INDEX", "UInt32"),  # The character position within the text of the MEDLINE citation of the last character of the sentence
-#         # (7, "SECTION_HEADER", "string"),  # Section header name of structured abstract
-#         # (8, "NORMALIZED_SECTION_HEADER", "string"),  # Normalized section header name
-#     ]
-#
-#     column_indices = [e[0] for e in column_info]
-#     column_names = [e[1] for e in column_info]
-#     column_dtypes = {e[1]: e[2] for e in column_info}
-#     data_frame = pd.read_csv(filepath, sep=separator, names=column_names, usecols=column_indices, dtype=column_dtypes, escapechar=escapechar)
-#
-#     data_frame = data_frame.astype({
-#         "SENTENCE": "string[pyarrow]"
-#     })
-#
-#     return data_frame
-#
-#
-# def get_semmed_sentence_map(semmed_sentence_data_frame: pd.DataFrame, semmed_predication_data_frame: pd.DataFrame) -> set:
-#     """
-#     Subset the sentence data frame by unique sentence IDs in the predication data frame, and transform the sentence two-column data frame into a dictionary of
-#     <SENTENCE_ID: int, SENTENCE: string>.
-#     """
-#     # Drop sentence rows whose SENTENCE_ID is not present in the predication data frame
-#     sentence_ids = set(semmed_predication_data_frame["SENTENCE_ID"].unique())
-#     presence_flags = semmed_sentence_data_frame["SENTENCE_ID"].isin(sentence_ids)
-#     absence_index = semmed_sentence_data_frame.index[~presence_flags]
-#     # TODO line below would cause "pyarrow.lib.ArrowInvalid: offset overflow while concatenating arrays"
-#     semmed_sentence_data_frame.drop(index=absence_index, inplace=True)  # drop in-place to save memory
-#
-#     semmed_sentence_mapping = semmed_sentence_data_frame.set_index("SENTENCE_ID").to_dict()["SENTENCE"]
-#     return semmed_sentence_mapping
 
 
 def read_semmed_predication_data_frame(filepath) -> pd.DataFrame:
@@ -794,7 +794,7 @@ def squeeze_series(series: pd.Series):
     return series.tolist()
 
 
-def construct_predication(predication_id, pmid, sentence_id, sentence) -> Dict:
+def construct_predication(predication_id, pmid, sentence_id, sentence: str, predication_aux: Dict) -> Dict:
     """
     Create the content for the "predication" field of the yielded docs.
     """
@@ -803,7 +803,8 @@ def construct_predication(predication_id, pmid, sentence_id, sentence) -> Dict:
         "predication_id": int(predication_id),
         "pmid": int(pmid),
         "sentence_id": int(sentence_id),
-        "sentence": sentence
+        "sentence": sentence,
+        **predication_aux
     }
     return predication
 
@@ -822,11 +823,11 @@ def construct_entity(cui, name, semtype, semtype_name, novelty, cui_prefix) -> D
     return entity
 
 
-def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], value_as_df: bool, semantic_type_map: Dict, sentence_map: Dict):
+def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], value_as_df: bool,
+                       semantic_type_map: Dict, sentence_map: Dict, predication_aux_map: Dict):
     """
     Make a document from an index tuple of ("SUBJECT_CUI", "PREDICATE", "OBJECT_CUI"), a value Series/DataFrame of ['PREDICATION_ID', 'SENTENCE_ID', 'PMID',
-        'SUBJECT_NAME', 'SUBJECT_SEMTYPE', 'SUBJECT_NOVELTY', 'OBJECT_NAME', 'OBJECT_SEMTYPE', 'OBJECT_NOVELTY', 'SUBJECT_PREFIX', 'OBJECT_PREFIX', '_ID'],
-        and a semantic type mapping.
+        'SUBJECT_NAME', 'SUBJECT_SEMTYPE', 'SUBJECT_NOVELTY', 'OBJECT_NAME', 'OBJECT_SEMTYPE', 'OBJECT_NOVELTY', 'SUBJECT_PREFIX', 'OBJECT_PREFIX', '_ID'].
 
     If value_as_df is true, value is a DataFrame; otherwise a Series.
     """
@@ -842,7 +843,8 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
         predication_list = [construct_predication(predication_id=pred_id,
                                                   pmid=pmid,
                                                   sentence_id=sentence_id,
-                                                  sentence=sentence_map.get(sentence_id, None))
+                                                  sentence=sentence_map.get(sentence_id, None),
+                                                  predication_aux=predication_aux_map.get(pred_id, None))
                             for (pred_id, pmid, sentence_id) in zip(value["PREDICATION_ID"], value["PMID"], value["SENTENCE_ID"])]
         subject_dict = construct_entity(cui=subject_cui,
                                         name=squeeze_series(value["SUBJECT_NAME"].unique()),
@@ -869,7 +871,8 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
         predication_list = [construct_predication(predication_id=value["PREDICATION_ID"],
                                                   pmid=value["PMID"],
                                                   sentence_id=value["SENTENCE_ID"],
-                                                  sentence=sentence_map.get(value["SENTENCE_ID"], None))]
+                                                  sentence=sentence_map.get(value["SENTENCE_ID"], None),
+                                                  predication_aux=predication_aux_map.get(value["PREDICATION_ID"], None))]
         subject_dict = construct_entity(cui=subject_cui,
                                         name=value["SUBJECT_NAME"],
                                         semtype=value["SUBJECT_SEMTYPE"],
@@ -905,7 +908,7 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
     return doc
 
 
-def generate_documents(predication_data_frame, semtype_name_map, sentence_map):
+def generate_documents(predication_data_frame, semtype_name_map, sentence_map, predication_aux_map):
     for index in set(predication_data_frame.index):  # each index is a tuple of ("SUBJECT_CUI", "PREDICATE", "OBJECT_CUI")
         sub_df = predication_data_frame.loc[index]  # type(sub_df) is pandas.core.frame.DataFrame
         if sub_df.shape[0] == 1:
@@ -915,7 +918,7 @@ def generate_documents(predication_data_frame, semtype_name_map, sentence_map):
             value = sub_df
             value_as_df = True
 
-        doc = construct_document(index, value, value_as_df, semtype_name_map, sentence_map)
+        doc = construct_document(index, value, value_as_df, semtype_name_map, sentence_map, predication_aux_map)
         yield doc
 
 
@@ -953,6 +956,7 @@ def load_data(data_folder, write_semmed_cache=False):
     node_norm_cache_path = os.path.join(data_folder, CACHE_DIR, SEMMED_NODE_NORM_RESPONSE_CACHE_FN)
     # SemMedDB filepaths
     semmed_pred_path = os.path.join(data_folder, SEMMED_PREDICATION_FN)
+    semmed_pred_aux_path = os.path.join(data_folder, SEMMED_PREDICATION_AUX_FN)
     semmed_sentence_path = os.path.join(data_folder, SEMMED_SENTENCE_FN)
     # Auxiliary filepaths
     mrcui_path = os.path.join(data_folder, UMLS_METATHESAURUS_DIR, MRCUI_FN)
@@ -980,10 +984,13 @@ def load_data(data_folder, write_semmed_cache=False):
     semtype_mappings_df = read_semantic_type_mappings_data_frame(filepath=semtype_mapping_path)
     semtype_name_map = get_semtype_name_map(semtype_mappings_df)
 
-    logging.info(f"Reading sentence table {semmed_pred_path} ...")
+    logging.info(f"Reading sentence table {semmed_sentence_path} ...")
     semmed_sentence_map = read_semmed_sentence_map(filepath=semmed_sentence_path, semmed_predication_data_frame=semmed_pred_df)
+
+    logging.info(f"Reading predication aux table {semmed_pred_aux_path} ...")
+    semmed_pred_aux_map = read_semmed_predication_aux_map(filepath=semmed_pred_aux_path, semmed_predication_data_frame=semmed_pred_df)
 
     logging.info(f"Setting index on predication data frame ...")
     semmed_pred_df = semmed_pred_df.set_index(INDEX_COLUMNS).sort_index()
     logging.info(f"Generating documents from predication data frame ...")
-    yield from generate_documents(semmed_pred_df, semtype_name_map, semmed_sentence_map)
+    yield from generate_documents(semmed_pred_df, semtype_name_map, semmed_sentence_map, semmed_pred_aux_map)

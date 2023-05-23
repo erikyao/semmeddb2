@@ -23,6 +23,18 @@ def semmeddb_prediction_mapping(cls):
                 },
                 "sentence": {
                     "type": "text"
+                },
+                "subject_text": {
+                    "type": "text"
+                },
+                "subject_score": {
+                    "type": "integer"
+                },
+                "object_text": {
+                    "type": "text"
+                },
+                "object_score": {
+                    "type": "integer"
                 }
             }
         },
