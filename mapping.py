@@ -22,7 +22,8 @@ def semmeddb_prediction_mapping(cls):
                     "type": "keyword"
                 },
                 "sentence": {
-                    "type": "text"
+                    "type": "text",
+                    "index": False
                 },
                 "subject_text": {
                     "type": "text"
