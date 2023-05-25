@@ -1,5 +1,6 @@
 import os
 import csv
+from itertools import islice
 import logging
 from pathlib import Path
 import pickle
@@ -37,6 +38,10 @@ Constants of column names
 """
 INDEX_COLUMNS = ["SUBJECT_CUI", "PREDICATE", "OBJECT_CUI"]
 
+"""
+A document can have at most 1000 predications. See https://github.com/biothings/biothings_explorer/issues/606#issuecomment-1562050560
+"""
+MAX_PREDICATION_LIST_LENGTH = 1000
 
 ###################################
 # PART 1: Load Semantic Type Data #
@@ -776,7 +781,7 @@ def query_node_normalizer_for_equivalent_ncbigene_ids(cui_collection: Collection
 # PART 6: Parser #
 ##################
 
-def squeeze_list(lst: List):
+def squeeze_list(lst: List) -> List:
     """
     If lst is a singlet (i.e. having only one element), return the element. Otherwise, return itself as is.
     """
@@ -785,7 +790,7 @@ def squeeze_list(lst: List):
     return lst
 
 
-def squeeze_series(series: pd.Series):
+def squeeze_series(series: pd.Series) -> List:
     """
     If series is a singlet (i.e. having only one element), return the element. Otherwise, return itself as a list.
     """
@@ -839,13 +844,6 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
         subject_semtype_name_unique = [semantic_type_map.get(semtype, None) for semtype in subject_semtype_unique]
         object_semtype_unique = value["OBJECT_SEMTYPE"].unique()
         object_semtype_name_unique = [semantic_type_map.get(semtype, None) for semtype in object_semtype_unique]
-
-        predication_list = [construct_predication(predication_id=pred_id,
-                                                  pmid=pmid,
-                                                  sentence_id=sentence_id,
-                                                  sentence=sentence_map.get(sentence_id, None),
-                                                  predication_aux=predication_aux_map.get(pred_id, None))
-                            for (pred_id, pmid, sentence_id) in zip(value["PREDICATION_ID"], value["PMID"], value["SENTENCE_ID"])]
         subject_dict = construct_entity(cui=subject_cui,
                                         name=squeeze_series(value["SUBJECT_NAME"].unique()),
                                         semtype=squeeze_series(subject_semtype_unique),
@@ -862,17 +860,23 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
                                        novelty=value["OBJECT_NOVELTY"][0],
                                        # value["OBJECT_PREFIX"] should have only one element, "umls" or "ncbigene"
                                        cui_prefix=value["OBJECT_PREFIX"][0])
+
+        _predications = (construct_predication(predication_id=pred_id,
+                                               pmid=pmid,
+                                               sentence_id=sentence_id,
+                                               sentence=sentence_map.get(sentence_id, None),
+                                               predication_aux=predication_aux_map.get(pred_id, None))
+                         for (pred_id, pmid, sentence_id) in zip(value["PREDICATION_ID"], value["PMID"], value["SENTENCE_ID"]))
+        if value.shape[0] > MAX_PREDICATION_LIST_LENGTH:
+            predication_list = list(islice(_predications, MAX_PREDICATION_LIST_LENGTH))
+        else:
+            predication_list = list(_predications)
         # Here .unique() returns a pandas.core.arrays.integer.IntegerArray, whose .size property somehow is a numpy.int64 (ridiculous!),
         #   which cannot be encoded by PyMongo Bson
         # pmid_count = value["PMID"].unique().size  # DO NOT USE THIS!
         pmid_count = len(value["PMID"].unique())
-        predication_count = len(predication_list)
+        predication_count = len(value["PREDICATION_ID"])
     else:
-        predication_list = [construct_predication(predication_id=value["PREDICATION_ID"],
-                                                  pmid=value["PMID"],
-                                                  sentence_id=value["SENTENCE_ID"],
-                                                  sentence=sentence_map.get(value["SENTENCE_ID"], None),
-                                                  predication_aux=predication_aux_map.get(value["PREDICATION_ID"], None))]
         subject_dict = construct_entity(cui=subject_cui,
                                         name=value["SUBJECT_NAME"],
                                         semtype=value["SUBJECT_SEMTYPE"],
@@ -885,6 +889,12 @@ def construct_document(index: Tuple, value: Union[pd.Series, pd.DataFrame], valu
                                        semtype_name=semantic_type_map.get(value["OBJECT_SEMTYPE"], None),
                                        novelty=value["OBJECT_NOVELTY"],
                                        cui_prefix=value["OBJECT_PREFIX"])
+
+        predication_list = [construct_predication(predication_id=value["PREDICATION_ID"],
+                                                  pmid=value["PMID"],
+                                                  sentence_id=value["SENTENCE_ID"],
+                                                  sentence=sentence_map.get(value["SENTENCE_ID"], None),
+                                                  predication_aux=predication_aux_map.get(value["PREDICATION_ID"], None))]
         pmid_count = 1
         predication_count = 1
 
