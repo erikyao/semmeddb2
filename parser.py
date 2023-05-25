@@ -799,7 +799,7 @@ def squeeze_series(series: pd.Series) -> List:
     return series.tolist()
 
 
-def construct_predication(predication_id, pmid, sentence_id, sentence: str, predication_aux: Dict) -> Dict:
+def construct_predication(predication_id, pmid, sentence_id, sentence: str, predication_aux: Union[Dict, None]) -> Dict:
     """
     Create the content for the "predication" field of the yielded docs.
     """
@@ -808,9 +808,18 @@ def construct_predication(predication_id, pmid, sentence_id, sentence: str, pred
         "predication_id": int(predication_id),
         "pmid": int(pmid),
         "sentence_id": int(sentence_id),
-        "sentence": sentence,
-        **predication_aux
+        "sentence": sentence
     }
+
+    if predication_aux:
+        """
+        predication_aux could be None (rarely), see https://github.com/biothings/biothings_explorer/issues/606#issuecomment-1562368254
+        """
+        predication = {
+            **predication,
+            **predication_aux
+        }
+
     return predication
 
 
